@@ -1,4 +1,3 @@
-﻿using System;
 using System.Text.RegularExpressions;
 using Esprima;
 using Jint.Collections;
@@ -7,48 +6,39 @@ using Jint.Native.Object;
 using Jint.Native.Symbol;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
-using Jint.Runtime.Descriptors.Specialized;
 using Jint.Runtime.Interop;
 
 namespace Jint.Native.RegExp
 {
-    public sealed class RegExpConstructor : FunctionInstance, IConstructor
+    public sealed class RegExpConstructor : Constructor
     {
         private static readonly JsString _functionName = new JsString("RegExp");
 
-        public RegExpConstructor(Engine engine)
-            : base(engine, _functionName, FunctionThisMode.Global)
+        internal RegExpConstructor(
+            Engine engine,
+            Realm realm,
+            FunctionPrototype functionPrototype,
+            ObjectPrototype objectPrototype)
+            : base(engine, realm, _functionName)
         {
+            _prototype = functionPrototype;
+            PrototypeObject = new RegExpPrototype(engine, realm, this, objectPrototype);
+            _length = new PropertyDescriptor(2, PropertyFlag.Configurable);
+            _prototypeDescriptor = new PropertyDescriptor(PrototypeObject, PropertyFlag.AllForbidden);
         }
 
-        public static RegExpConstructor CreateRegExpConstructor(Engine engine)
-        {
-            var obj = new RegExpConstructor(engine)
-            {
-                _prototype = engine.Function.PrototypeObject
-            };
-
-            // The value of the [[Prototype]] internal property of the RegExp constructor is the Function prototype object
-            obj.PrototypeObject = RegExpPrototype.CreatePrototypeObject(engine, obj);
-
-            obj._length = new PropertyDescriptor(2, PropertyFlag.AllForbidden);
-
-            // The initial value of RegExp.prototype is the RegExp prototype object
-            obj._prototypeDescriptor= new PropertyDescriptor(obj.PrototypeObject, PropertyFlag.AllForbidden);
-
-            return obj;
-        }
+        internal RegExpPrototype PrototypeObject { get; }
 
         protected override void Initialize()
         {
             var symbols = new SymbolDictionary(1)
             {
-                [GlobalSymbolRegistry.Species] = new GetSetPropertyDescriptor(get: new ClrFunctionInstance(_engine, "get [Symbol.species]", (thisObj, _) => thisObj, 0, PropertyFlag.Configurable), set: Undefined, PropertyFlag.Configurable)
+                [GlobalSymbolRegistry.Species] = new GetSetPropertyDescriptor(get: new ClrFunction(_engine, "get [Symbol.species]", (thisObj, _) => thisObj, 0, PropertyFlag.Configurable), set: Undefined, PropertyFlag.Configurable)
             };
             SetSymbols(symbols);
         }
 
-        public override JsValue Call(JsValue thisObject, JsValue[] arguments)
+        protected internal override JsValue Call(JsValue thisObject, JsValue[] arguments)
         {
             return Construct(arguments, thisObject);
         }
@@ -61,7 +51,7 @@ namespace Jint.Native.RegExp
         /// <summary>
         /// https://tc39.es/ecma262/#sec-regexp-pattern-flags
         /// </summary>
-        public ObjectInstance Construct(JsValue[] arguments, JsValue newTarget)
+        public override ObjectInstance Construct(JsValue[] arguments, JsValue newTarget)
         {
             var pattern = arguments.At(0);
             var flags = arguments.At(1);
@@ -82,7 +72,7 @@ namespace Jint.Native.RegExp
 
             JsValue p;
             JsValue f;
-            if (pattern is RegExpInstance regExpInstance)
+            if (pattern is JsRegExp regExpInstance)
             {
                 p = regExpInstance.Source;
                 f = flags.IsUndefined() ? regExpInstance.Flags : flags;
@@ -98,11 +88,11 @@ namespace Jint.Native.RegExp
                 f = flags;
             }
 
-            var r = RegExpAlloc();
+            var r = RegExpAlloc(newTarget);
             return RegExpInitialize(r, p, f);
         }
 
-        private ObjectInstance RegExpInitialize(RegExpInstance r, JsValue pattern, JsValue flags)
+        private JsRegExp RegExpInitialize(JsRegExp r, JsValue pattern, JsValue flags)
         {
             var p = pattern.IsUndefined() ? "" : TypeConverter.ToString(pattern);
             if (string.IsNullOrEmpty(p))
@@ -114,91 +104,54 @@ namespace Jint.Native.RegExp
 
             try
             {
-                var scanner = new Scanner("/" + p + "/" + flags , new ParserOptions { AdaptRegexp = true });
-               
-                // seems valid
-                r.Value = scanner.TestRegExp(p, f);
+                var regExpParseResult = Scanner.AdaptRegExp(p, f, compiled: false, _engine.Options.Constraints.RegexTimeout);
 
-                var timeout = _engine.Options._RegexTimeoutInterval;
-                if (timeout.Ticks > 0)
+                if (!regExpParseResult.Success)
                 {
-                    r.Value = new Regex(r.Value.ToString(), r.Value.Options, timeout);
+                    ExceptionHelper.ThrowSyntaxError(_realm, $"Unsupported regular expression. {regExpParseResult.ConversionError!.Description}");
                 }
+
+                r.Value = regExpParseResult.Regex!;
+                r.ParseResult = regExpParseResult;
             }
             catch (Exception ex)
             {
-                ExceptionHelper.ThrowSyntaxError(_engine, ex.Message);
+                ExceptionHelper.ThrowSyntaxError(_realm, ex.Message);
             }
 
             r.Flags = f;
             r.Source = p;
-            
+
             RegExpInitialize(r);
 
             return r;
         }
 
-        private RegExpInstance RegExpAlloc()
+        private JsRegExp RegExpAlloc(JsValue newTarget)
         {
-            var r = new RegExpInstance(Engine)
-            {
-                _prototype = PrototypeObject
-            };
+            var r = OrdinaryCreateFromConstructor(
+                newTarget,
+                static intrinsics => intrinsics.RegExp.PrototypeObject,
+                static (Engine engine, Realm _, object? _) => new JsRegExp(engine));
             return r;
         }
 
-        public RegExpInstance Construct(string regExp, Engine engine)
+        public JsRegExp Construct(Regex regExp, string source, string flags, RegExpParseResult regExpParseResult = default)
         {
-            var r = new RegExpInstance(Engine);
-            r._prototype = PrototypeObject;
-
-            var scanner = new Scanner(regExp, new ParserOptions { AdaptRegexp = true });
-            var body = (string)scanner.ScanRegExpBody().Value;
-            var flags = (string)scanner.ScanRegExpFlags().Value;
-            r.Value = scanner.TestRegExp(body, flags);
-
-            var timeout = engine.Options._RegexTimeoutInterval;
-            if (timeout.Ticks > 0)
-            {
-                r.Value = new Regex(r.Value.ToString(), r.Value.Options);
-            }
-
+            var r = RegExpAlloc(this);
+            r.Value = regExp;
+            r.Source = source;
             r.Flags = flags;
-            r.Source = string.IsNullOrEmpty(body) ? "(?:)" : body;
-
-            RegExpInitialize(r);
-            
-            return r;
-        }
-
-        public RegExpInstance Construct(Regex regExp, string flags, Engine engine)
-        {
-            var r = new RegExpInstance(Engine);
-            r._prototype = PrototypeObject;
-
-            r.Flags = flags;
-            r.Source = regExp.ToString();
-
-            var timeout = _engine.Options._RegexTimeoutInterval;
-            if (timeout.Ticks > 0)
-            {
-                r.Value = new Regex(regExp.ToString(), regExp.Options, timeout);
-            }
-            else
-            {
-                r.Value = regExp;
-            }
+            r.ParseResult = regExpParseResult;
 
             RegExpInitialize(r);
 
             return r;
         }
-        
-        private static void RegExpInitialize(RegExpInstance r)
+
+        private static void RegExpInitialize(JsRegExp r)
         {
-            r.SetOwnProperty(RegExpInstance.PropertyLastIndex, new PropertyDescriptor(0, PropertyFlag.OnlyWritable));
+            r.SetOwnProperty(JsRegExp.PropertyLastIndex, new PropertyDescriptor(0, PropertyFlag.OnlyWritable));
         }
-        
-        public RegExpPrototype PrototypeObject { get; private set; }
     }
 }

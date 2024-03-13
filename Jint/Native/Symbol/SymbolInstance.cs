@@ -1,19 +1,22 @@
-﻿using Jint.Native.Object;
+using Jint.Native.Object;
 using Jint.Runtime;
 
-namespace Jint.Native.Symbol
+namespace Jint.Native.Symbol;
+
+internal sealed class SymbolInstance : ObjectInstance, IJsPrimitive
 {
-    public class SymbolInstance : ObjectInstance, IPrimitiveInstance
+    internal SymbolInstance(
+        Engine engine,
+        SymbolPrototype prototype,
+        JsSymbol symbol) : base(engine)
     {
-        public SymbolInstance(Engine engine)
-            : base(engine, ObjectClass.Symbol)
-        {
-        }
-
-        Types IPrimitiveInstance.Type => Types.Symbol;
-
-        JsValue IPrimitiveInstance.PrimitiveValue => SymbolData;
-
-        public JsSymbol SymbolData { get; set; }
+        _prototype = prototype;
+        SymbolData = symbol;
     }
+
+    Types IJsPrimitive.Type => Types.Symbol;
+
+    JsValue IJsPrimitive.PrimitiveValue => SymbolData;
+
+    public JsSymbol SymbolData { get; }
 }

@@ -9,40 +9,49 @@ namespace Jint.Runtime.Interpreter.Statements
     /// </summary>
     internal sealed class JintWhileStatement : JintStatement<WhileStatement>
     {
-        private readonly string _labelSetName;
-        private readonly JintStatement _body;
-        private readonly JintExpression _test;
+        private string? _labelSetName;
+        private ProbablyBlockStatement _body;
+        private JintExpression _test = null!;
 
-        public JintWhileStatement(Engine engine, WhileStatement statement) : base(engine, statement)
+        public JintWhileStatement(WhileStatement statement) : base(statement)
         {
-            _labelSetName = _statement?.LabelSet?.Name;
-            _body = Build(engine, statement.Body);
-            _test = JintExpression.Build(engine, statement.Test);
         }
 
-        protected override Completion ExecuteInternal()
+        protected override void Initialize(EvaluationContext context)
         {
-            var v = Undefined.Instance;
+            _labelSetName = _statement.LabelSet?.Name;
+            _body = new ProbablyBlockStatement(_statement.Body);
+            _test = JintExpression.Build(_statement.Test);
+        }
+
+        protected override Completion ExecuteInternal(EvaluationContext context)
+        {
+            var v = JsValue.Undefined;
             while (true)
             {
-                var jsValue = _test.GetValue();
-                if (!TypeConverter.ToBoolean(jsValue))
+                if (context.DebugMode)
                 {
-                    return new Completion(CompletionType.Normal, v, null, Location);
+                    context.Engine.Debugger.OnStep(_test._expression);
                 }
 
-                var completion = _body.Execute();
+                var jsValue = _test.GetValue(context);
+                if (!TypeConverter.ToBoolean(jsValue))
+                {
+                    return new Completion(CompletionType.Normal, v, _statement);
+                }
 
-                if (!ReferenceEquals(completion.Value, null))
+                var completion = _body.Execute(context);
+
+                if (!completion.Value.IsEmpty)
                 {
                     v = completion.Value;
                 }
 
-                if (completion.Type != CompletionType.Continue || completion.Identifier != _labelSetName)
+                if (completion.Type != CompletionType.Continue || !string.Equals(context.Target, _labelSetName, StringComparison.Ordinal))
                 {
-                    if (completion.Type == CompletionType.Break && (completion.Identifier == null || completion.Identifier == _labelSetName))
+                    if (completion.Type == CompletionType.Break && (context.Target == null || string.Equals(context.Target, _labelSetName, StringComparison.Ordinal)))
                     {
-                        return new Completion(CompletionType.Normal, v, null, Location);
+                        return new Completion(CompletionType.Normal, v, _statement);
                     }
 
                     if (completion.Type != CompletionType.Normal)

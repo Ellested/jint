@@ -1,15 +1,16 @@
-﻿using System.Runtime.CompilerServices;
+using System.Runtime.CompilerServices;
 using Esprima;
 using Esprima.Ast;
+using Jint.Native;
 using Jint.Runtime.Interpreter.Expressions;
 
 namespace Jint.Runtime.Interpreter.Statements
 {
     internal abstract class JintStatement<T> : JintStatement where T : Statement
     {
-        internal readonly T _statement;
+        internal new readonly T _statement;
 
-        protected JintStatement(Engine engine, T statement) : base(engine, statement)
+        protected JintStatement(T statement) : base(statement)
         {
             _statement = statement;
         }
@@ -17,85 +18,94 @@ namespace Jint.Runtime.Interpreter.Statements
 
     internal abstract class JintStatement
     {
-        protected readonly Engine _engine;
-        private readonly Statement _statement;
+        internal readonly Statement _statement;
+        private bool _initialized;
 
-        // require sub-classes to set to false explicitly to skip virtual call
-        protected bool _initialized = true;
-
-        protected JintStatement(Engine engine, Statement statement)
+        protected JintStatement(Statement statement)
         {
-            _engine = engine;
             _statement = statement;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public Completion Execute()
+        [MethodImpl(MethodImplOptions.AggressiveInlining | (MethodImplOptions) 512)]
+        public Completion Execute(EvaluationContext context)
         {
             if (_statement.Type != Nodes.BlockStatement)
             {
-                _engine._lastSyntaxNode = _statement;
-                _engine.RunBeforeExecuteStatementChecks(_statement);
+                context.PrepareFor(_statement);
+                context.RunBeforeExecuteStatementChecks(_statement);
             }
 
             if (!_initialized)
             {
-                Initialize();
+                Initialize(context);
                 _initialized = true;
             }
 
-            return ExecuteInternal();
+            return ExecuteInternal(context);
         }
 
-        protected abstract Completion ExecuteInternal();
+        protected abstract Completion ExecuteInternal(EvaluationContext context);
 
-        public Location Location => _statement.Location;
+        public ref readonly Location Location => ref _statement.Location;
 
         /// <summary>
         /// Opportunity to build one-time structures and caching based on lexical context.
         /// </summary>
-        protected virtual void Initialize()
+        /// <param name="context"></param>
+        protected virtual void Initialize(EvaluationContext context)
         {
         }
 
-        protected internal static JintStatement Build(Engine engine, Statement statement)
+        protected internal static JintStatement Build(Statement statement)
         {
-            return statement.Type switch
+            if (statement.AssociatedData is JintStatement preparedStatement)
             {
-                Nodes.BlockStatement => new JintBlockStatement(engine, (BlockStatement) statement),
-                Nodes.ReturnStatement => new JintReturnStatement(engine, (ReturnStatement) statement),
-                Nodes.VariableDeclaration => new JintVariableDeclaration(engine, (VariableDeclaration) statement),
-                Nodes.BreakStatement => new JintBreakStatement(engine, (BreakStatement) statement),
-                Nodes.ContinueStatement => new JintContinueStatement(engine, (ContinueStatement) statement),
-                Nodes.DoWhileStatement => new JintDoWhileStatement(engine, (DoWhileStatement) statement),
-                Nodes.EmptyStatement => new JintEmptyStatement(engine, (EmptyStatement) statement),
-                Nodes.ExpressionStatement => new JintExpressionStatement(engine, (ExpressionStatement) statement),
-                Nodes.ForStatement => new JintForStatement(engine, (ForStatement) statement),
-                Nodes.ForInStatement => new JintForInForOfStatement(engine, (ForInStatement) statement),
-                Nodes.ForOfStatement => new JintForInForOfStatement(engine, (ForOfStatement) statement),
-                Nodes.IfStatement => new JintIfStatement(engine, (IfStatement) statement),
-                Nodes.LabeledStatement => new JintLabeledStatement(engine, (LabeledStatement) statement),
-                Nodes.SwitchStatement => new JintSwitchStatement(engine, (SwitchStatement) statement),
-                Nodes.FunctionDeclaration => new JintFunctionDeclarationStatement(engine, (FunctionDeclaration) statement),
-                Nodes.ThrowStatement => new JintThrowStatement(engine, (ThrowStatement) statement),
-                Nodes.TryStatement => new JintTryStatement(engine, (TryStatement) statement),
-                Nodes.WhileStatement => new JintWhileStatement(engine, (WhileStatement) statement),
-                Nodes.WithStatement => new JintWithStatement(engine, (WithStatement) statement),
-                Nodes.DebuggerStatement => new JintDebuggerStatement(engine, (DebuggerStatement) statement),
-                Nodes.Program => new JintScript(engine, statement as Script ?? ExceptionHelper.ThrowArgumentException<Script>("modules not supported")),
-                _ => ExceptionHelper.ThrowArgumentOutOfRangeException<JintStatement>(nameof(statement.Type), $"unsupported statement type '{statement.Type}'")
+                return preparedStatement;
+            }
+
+            JintStatement? result = statement.Type switch
+            {
+                Nodes.BlockStatement => new JintBlockStatement((BlockStatement) statement),
+                Nodes.ReturnStatement => new JintReturnStatement((ReturnStatement) statement),
+                Nodes.VariableDeclaration => new JintVariableDeclaration((VariableDeclaration) statement),
+                Nodes.BreakStatement => new JintBreakStatement((BreakStatement) statement),
+                Nodes.ContinueStatement => new JintContinueStatement((ContinueStatement) statement),
+                Nodes.DoWhileStatement => new JintDoWhileStatement((DoWhileStatement) statement),
+                Nodes.EmptyStatement => new JintEmptyStatement((EmptyStatement) statement),
+                Nodes.ExpressionStatement => new JintExpressionStatement((ExpressionStatement) statement),
+                Nodes.ForStatement => new JintForStatement((ForStatement) statement),
+                Nodes.ForInStatement => new JintForInForOfStatement((ForInStatement) statement),
+                Nodes.ForOfStatement => new JintForInForOfStatement((ForOfStatement) statement),
+                Nodes.IfStatement => new JintIfStatement((IfStatement) statement),
+                Nodes.LabeledStatement => new JintLabeledStatement((LabeledStatement) statement),
+                Nodes.SwitchStatement => new JintSwitchStatement((SwitchStatement) statement),
+                Nodes.FunctionDeclaration => new JintFunctionDeclarationStatement((FunctionDeclaration) statement),
+                Nodes.ThrowStatement => new JintThrowStatement((ThrowStatement) statement),
+                Nodes.TryStatement => new JintTryStatement((TryStatement) statement),
+                Nodes.WhileStatement => new JintWhileStatement((WhileStatement) statement),
+                Nodes.WithStatement => new JintWithStatement((WithStatement) statement),
+                Nodes.DebuggerStatement => new JintDebuggerStatement((DebuggerStatement) statement),
+                Nodes.ClassDeclaration => new JintClassDeclarationStatement((ClassDeclaration) statement),
+                Nodes.ExportNamedDeclaration => new JintExportNamedDeclaration((ExportNamedDeclaration) statement),
+                Nodes.ExportAllDeclaration => new JintExportAllDeclaration((ExportAllDeclaration) statement),
+                Nodes.ExportDefaultDeclaration => new JintExportDefaultDeclaration((ExportDefaultDeclaration) statement),
+                Nodes.ImportDeclaration => new JintImportDeclaration((ImportDeclaration) statement),
+                _ => null
             };
+
+            if (result is null)
+            {
+                ExceptionHelper.ThrowArgumentOutOfRangeException(nameof(statement.Type), $"unsupported statement type '{statement.Type}'");
+            }
+
+            return result;
         }
 
-        internal static Completion? FastResolve(StatementListItem statement)
+        internal static JsValue? FastResolve(StatementListItem statement)
         {
             if (statement is ReturnStatement rs && rs.Argument is Literal l)
             {
-                var jsValue = JintLiteralExpression.ConvertToJsValue(l);
-                if (jsValue != null)
-                {
-                    return new Completion(CompletionType.Return, jsValue, null, rs.Location);
-                }
+                return JintLiteralExpression.ConvertToJsValue(l);
             }
 
             return null;

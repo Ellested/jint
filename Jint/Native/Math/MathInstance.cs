@@ -1,4 +1,3 @@
-﻿using System;
 using Jint.Collections;
 using Jint.Native.Number;
 using Jint.Native.Object;
@@ -9,63 +8,54 @@ using Jint.Runtime.Interop;
 
 namespace Jint.Native.Math
 {
-    public sealed class MathInstance : ObjectInstance
+    internal sealed class MathInstance : ObjectInstance
     {
-        private Random _random;
+        private Random? _random;
 
-        private MathInstance(Engine engine) : base(engine, ObjectClass.Math)
+        internal MathInstance(Engine engine, ObjectPrototype objectPrototype) : base(engine)
         {
-        }
-
-        public static MathInstance CreateMathObject(Engine engine)
-        {
-            var math = new MathInstance(engine)
-            {
-                _prototype = engine.Object.PrototypeObject
-            };
-
-            return math;
+            _prototype = objectPrototype;
         }
 
         protected override void Initialize()
         {
             var properties = new PropertyDictionary(45, checkExistingKeys: false)
             {
-                ["abs"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "abs", Abs, 1, PropertyFlag.Configurable), true, false, true),
-                ["acos"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "acos", Acos, 1, PropertyFlag.Configurable), true, false, true),
-                ["acosh"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "acosh", Acosh, 1, PropertyFlag.Configurable), true, false, true),
-                ["asin"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "asin", Asin, 1, PropertyFlag.Configurable), true, false, true),
-                ["asinh"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "asinh", Asinh, 1, PropertyFlag.Configurable), true, false, true),
-                ["atan"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "atan", Atan, 1, PropertyFlag.Configurable), true, false, true),
-                ["atanh"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "atanh", Atanh, 1, PropertyFlag.Configurable), true, false, true),
-                ["atan2"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "atan2", Atan2, 2, PropertyFlag.Configurable), true, false, true),
-                ["ceil"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "ceil", Ceil, 1, PropertyFlag.Configurable), true, false, true),
-                ["cos"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "cos", Cos, 1, PropertyFlag.Configurable), true, false, true),
-                ["cosh"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "cosh", Cosh, 1, PropertyFlag.Configurable), true, false, true),
-                ["exp"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "exp", Exp, 1, PropertyFlag.Configurable), true, false, true),
-                ["expm1"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "expm1", Expm1, 1, PropertyFlag.Configurable), true, false, true),
-                ["floor"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "floor", Floor, 1, PropertyFlag.Configurable), true, false, true),
-                ["log"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "log", Log, 1, PropertyFlag.Configurable), true, false, true),
-                ["log1p"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "log1p", Log1p, 1, PropertyFlag.Configurable), true, false, true),
-                ["log2"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "log2", Log2, 1, PropertyFlag.Configurable), true, false, true),
-                ["log10"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "log10", Log10, 1, PropertyFlag.Configurable), true, false, true),
-                ["max"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "max", Max, 2, PropertyFlag.Configurable), true, false, true),
-                ["min"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "min", Min, 2, PropertyFlag.Configurable), true, false, true),
-                ["pow"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "pow", Pow, 2, PropertyFlag.Configurable), true, false, true),
-                ["random"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "random", Random, 0, PropertyFlag.Configurable), true, false, true),
-                ["round"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "round", Round, 1, PropertyFlag.Configurable), true, false, true),
-                ["fround"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "fround", Fround, 1, PropertyFlag.Configurable), true, false, true),
-                ["sin"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "sin", Sin, 1, PropertyFlag.Configurable), true, false, true),
-                ["sinh"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "sinh", Sinh, 1, PropertyFlag.Configurable), true, false, true),
-                ["sqrt"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "sqrt", Sqrt, 1, PropertyFlag.Configurable), true, false, true),
-                ["tan"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "tan", Tan, 1, PropertyFlag.Configurable), true, false, true),
-                ["tanh"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "tanh", Tanh, 1, PropertyFlag.Configurable), true, false, true),
-                ["trunc"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "trunc", Truncate, 1, PropertyFlag.Configurable), true, false, true),
-                ["sign"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "sign", Sign, 1, PropertyFlag.Configurable), true, false, true),
-                ["cbrt"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "cbrt", Cbrt, 1, PropertyFlag.Configurable), true, false, true),
-                ["hypot"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "hypot", Hypot, 2, PropertyFlag.Configurable), true, false, true),
-                ["imul"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "imul", Imul, 2, PropertyFlag.Configurable), true, false, true),
-                ["clz32"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "clz32", Clz32, 1, PropertyFlag.Configurable), true, false, true),
+                ["abs"] = new PropertyDescriptor(new ClrFunction(Engine, "abs", Abs, 1, PropertyFlag.Configurable), true, false, true),
+                ["acos"] = new PropertyDescriptor(new ClrFunction(Engine, "acos", Acos, 1, PropertyFlag.Configurable), true, false, true),
+                ["acosh"] = new PropertyDescriptor(new ClrFunction(Engine, "acosh", Acosh, 1, PropertyFlag.Configurable), true, false, true),
+                ["asin"] = new PropertyDescriptor(new ClrFunction(Engine, "asin", Asin, 1, PropertyFlag.Configurable), true, false, true),
+                ["asinh"] = new PropertyDescriptor(new ClrFunction(Engine, "asinh", Asinh, 1, PropertyFlag.Configurable), true, false, true),
+                ["atan"] = new PropertyDescriptor(new ClrFunction(Engine, "atan", Atan, 1, PropertyFlag.Configurable), true, false, true),
+                ["atanh"] = new PropertyDescriptor(new ClrFunction(Engine, "atanh", Atanh, 1, PropertyFlag.Configurable), true, false, true),
+                ["atan2"] = new PropertyDescriptor(new ClrFunction(Engine, "atan2", Atan2, 2, PropertyFlag.Configurable), true, false, true),
+                ["ceil"] = new PropertyDescriptor(new ClrFunction(Engine, "ceil", Ceil, 1, PropertyFlag.Configurable), true, false, true),
+                ["cos"] = new PropertyDescriptor(new ClrFunction(Engine, "cos", Cos, 1, PropertyFlag.Configurable), true, false, true),
+                ["cosh"] = new PropertyDescriptor(new ClrFunction(Engine, "cosh", Cosh, 1, PropertyFlag.Configurable), true, false, true),
+                ["exp"] = new PropertyDescriptor(new ClrFunction(Engine, "exp", Exp, 1, PropertyFlag.Configurable), true, false, true),
+                ["expm1"] = new PropertyDescriptor(new ClrFunction(Engine, "expm1", Expm1, 1, PropertyFlag.Configurable), true, false, true),
+                ["floor"] = new PropertyDescriptor(new ClrFunction(Engine, "floor", Floor, 1, PropertyFlag.Configurable), true, false, true),
+                ["log"] = new PropertyDescriptor(new ClrFunction(Engine, "log", Log, 1, PropertyFlag.Configurable), true, false, true),
+                ["log1p"] = new PropertyDescriptor(new ClrFunction(Engine, "log1p", Log1p, 1, PropertyFlag.Configurable), true, false, true),
+                ["log2"] = new PropertyDescriptor(new ClrFunction(Engine, "log2", Log2, 1, PropertyFlag.Configurable), true, false, true),
+                ["log10"] = new PropertyDescriptor(new ClrFunction(Engine, "log10", Log10, 1, PropertyFlag.Configurable), true, false, true),
+                ["max"] = new PropertyDescriptor(new ClrFunction(Engine, "max", Max, 2, PropertyFlag.Configurable), true, false, true),
+                ["min"] = new PropertyDescriptor(new ClrFunction(Engine, "min", Min, 2, PropertyFlag.Configurable), true, false, true),
+                ["pow"] = new PropertyDescriptor(new ClrFunction(Engine, "pow", Pow, 2, PropertyFlag.Configurable), true, false, true),
+                ["random"] = new PropertyDescriptor(new ClrFunction(Engine, "random", Random, 0, PropertyFlag.Configurable), true, false, true),
+                ["round"] = new PropertyDescriptor(new ClrFunction(Engine, "round", Round, 1, PropertyFlag.Configurable), true, false, true),
+                ["fround"] = new PropertyDescriptor(new ClrFunction(Engine, "fround", Fround, 1, PropertyFlag.Configurable), true, false, true),
+                ["sin"] = new PropertyDescriptor(new ClrFunction(Engine, "sin", Sin, 1, PropertyFlag.Configurable), true, false, true),
+                ["sinh"] = new PropertyDescriptor(new ClrFunction(Engine, "sinh", Sinh, 1, PropertyFlag.Configurable), true, false, true),
+                ["sqrt"] = new PropertyDescriptor(new ClrFunction(Engine, "sqrt", Sqrt, 1, PropertyFlag.Configurable), true, false, true),
+                ["tan"] = new PropertyDescriptor(new ClrFunction(Engine, "tan", Tan, 1, PropertyFlag.Configurable), true, false, true),
+                ["tanh"] = new PropertyDescriptor(new ClrFunction(Engine, "tanh", Tanh, 1, PropertyFlag.Configurable), true, false, true),
+                ["trunc"] = new PropertyDescriptor(new ClrFunction(Engine, "trunc", Truncate, 1, PropertyFlag.Configurable), true, false, true),
+                ["sign"] = new PropertyDescriptor(new ClrFunction(Engine, "sign", Sign, 1, PropertyFlag.Configurable), true, false, true),
+                ["cbrt"] = new PropertyDescriptor(new ClrFunction(Engine, "cbrt", Cbrt, 1, PropertyFlag.Configurable), true, false, true),
+                ["hypot"] = new PropertyDescriptor(new ClrFunction(Engine, "hypot", Hypot, 2, PropertyFlag.Configurable), true, false, true),
+                ["imul"] = new PropertyDescriptor(new ClrFunction(Engine, "imul", Imul, 2, PropertyFlag.Configurable), true, false, true),
+                ["clz32"] = new PropertyDescriptor(new ClrFunction(Engine, "clz32", Clz32, 1, PropertyFlag.Configurable), true, false, true),
                 ["E"] = new PropertyDescriptor(System.Math.E, false, false, false),
                 ["LN10"] = new PropertyDescriptor(System.Math.Log(10), false, false, false),
                 ["LN2"] = new PropertyDescriptor(System.Math.Log(2), false, false, false),
@@ -378,7 +368,7 @@ namespace Jint.Native.Math
                 return JsNumber.NegativeZero;
             }
 #endif
-            
+
             return System.Math.Ceiling(x);
         }
 
@@ -609,6 +599,9 @@ namespace Jint.Native.Math
             return System.Math.Log10(x);
         }
 
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-math.max
+        /// </summary>
         private static JsValue Max(JsValue thisObject, JsValue[] arguments)
         {
             if (arguments.Length == 0)
@@ -616,36 +609,31 @@ namespace Jint.Native.Math
                 return JsNumber.DoubleNegativeInfinity;
             }
 
-            double max = TypeConverter.ToNumber(arguments.At(0));
-
-            if (double.IsNaN(max))
+            var highest = double.NegativeInfinity;
+            foreach (var number in Coerced(arguments))
             {
-                return JsNumber.DoubleNaN;
-            }
-
-            for (int i = 0; i < arguments.Length; i++)
-            {
-                var value = TypeConverter.ToNumber(arguments[i]);
-
-                if (double.IsNaN(value))
+                if (double.IsNaN(number))
                 {
                     return JsNumber.DoubleNaN;
                 }
 
-                if (max == 0 && value == 0)
+                if (NumberInstance.IsPositiveZero(number) && NumberInstance.IsNegativeZero(highest))
                 {
-                    max = NumberInstance.IsNegativeZero(value)
-                        ? max
-                        : value;
+                    highest = 0;
                 }
-                else
+
+                if (number > highest)
                 {
-                    max = System.Math.Max(max, value);
+                    highest = number;
                 }
             }
-            return max;
+
+            return highest;
         }
 
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-math.min
+        /// </summary>
         private static JsValue Min(JsValue thisObject, JsValue[] arguments)
         {
             if (arguments.Length == 0)
@@ -653,22 +641,26 @@ namespace Jint.Native.Math
                 return JsNumber.DoublePositiveInfinity;
             }
 
-            double min = TypeConverter.ToNumber(arguments.At(0));
-            for (int i = 0; i < arguments.Length; i++)
+            var lowest = double.PositiveInfinity;
+            foreach (var number in Coerced(arguments))
             {
-                var value = TypeConverter.ToNumber(arguments[i]);
-                if (min == 0 && value == 0)
+                if (double.IsNaN(number))
                 {
-                    min = NumberInstance.IsNegativeZero(min)
-                        ? min
-                        : value;
+                    return JsNumber.DoubleNaN;
                 }
-                else
+
+                if (NumberInstance.IsNegativeZero(number) && NumberInstance.IsPositiveZero(lowest))
                 {
-                    min = System.Math.Min(min, value);
+                    lowest = JsNumber.NegativeZero._value;
+                }
+
+                if (number < lowest)
+                {
+                    lowest = number;
                 }
             }
-            return min;
+
+            return lowest;
         }
 
         private static JsValue Pow(JsValue thisObject, JsValue[] arguments)
@@ -686,7 +678,7 @@ namespace Jint.Native.Math
             {
                 return 1;
             }
-            
+
             return HandlePowUnlikely(y, x);
         }
 
@@ -831,7 +823,7 @@ namespace Jint.Native.Math
             {
                 _random = new Random();
             }
-            
+
             return _random.NextDouble();
         }
 
@@ -1006,19 +998,57 @@ namespace Jint.Native.Math
             return -1 * System.Math.Pow(System.Math.Abs(x), 1.0 / 3.0);
         }
 
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-math.hypot
+        /// </summary>
         private static JsValue Hypot(JsValue thisObject, JsValue[] arguments)
         {
-            double y = 0;
-            for (int i = 0; i < arguments.Length; ++i)
+            var coerced = Coerced(arguments);
+
+            foreach (var number in coerced)
             {
-                var number = TypeConverter.ToNumber(arguments[i]);
                 if (double.IsInfinity(number))
                 {
                     return JsNumber.DoublePositiveInfinity;
                 }
+            }
+
+            var onlyZero = true;
+            double y = 0;
+            foreach (var number in coerced)
+            {
+                if (double.IsNaN(number))
+                {
+                    return JsNumber.DoubleNaN;
+                }
+
+                if (onlyZero && number != 0)
+                {
+                    onlyZero = false;
+                }
+
                 y += number * number;
             }
+
+            if (onlyZero)
+            {
+                return JsNumber.PositiveZero;
+            }
+
             return System.Math.Sqrt(y);
+        }
+
+        private static double[] Coerced(JsValue[] arguments)
+        {
+            // TODO stackalloc
+            var coerced = new double[arguments.Length];
+            for (var i = 0; i < arguments.Length; i++)
+            {
+                var argument = arguments[i];
+                coerced[i] = TypeConverter.ToNumber(argument);
+            }
+
+            return coerced;
         }
 
         private static JsValue Imul(JsValue thisObject, JsValue[] arguments)

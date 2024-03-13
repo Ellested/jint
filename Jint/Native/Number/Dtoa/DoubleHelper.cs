@@ -1,4 +1,6 @@
-﻿// Copyright 2010 the V8 project authors. All rights reserved.
+#nullable disable
+
+// Copyright 2010 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -29,13 +31,14 @@
 // The original revision was 67d1049b0bf9 from the mozilla-central tree.
 
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace Jint.Native.Number.Dtoa
 {
     /// <summary>
     /// Helper functions for doubles.
     /// </summary>
-    internal class DoubleHelper
+    internal sealed class DoubleHelper
     {
         internal const ulong KExponentMask = 0x7FF0000000000000L;
         internal const ulong KSignificandMask = 0x000FFFFFFFFFFFFFL;
@@ -110,6 +113,7 @@ namespace Jint.Native.Number.Dtoa
             return (d64 & KExponentMask) == KExponentMask;
         }
 
+        [StructLayout(LayoutKind.Auto)]
         internal readonly struct NormalizedBoundariesResult
         {
             public NormalizedBoundariesResult(DiyFp minus, DiyFp plus)

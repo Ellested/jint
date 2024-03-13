@@ -1,6 +1,6 @@
+#nullable disable
+
 using System.Collections;
-using System.Collections.Generic;
-using System.Linq;
 using System.Runtime.CompilerServices;
 
 namespace Jint.Collections
@@ -28,6 +28,12 @@ namespace Jint.Collections
             }
         }
 
+        protected HybridDictionary(StringDictionarySlim<TValue> dictionary)
+        {
+            _checkExistingKeys = true;
+            _dictionary = dictionary;
+        }
+
         public TValue this[Key key]
         {
             get
@@ -45,7 +51,7 @@ namespace Jint.Collections
                 {
                     if (_list.Count >= CutoverPoint - 1)
                     {
-                        SwitchToDictionary(key, value);
+                        SwitchToDictionary(key, value, tryAdd: false);
                     }
                     else
                     {
@@ -75,7 +81,23 @@ namespace Jint.Collections
             return false;
         }
 
-        private void SwitchToDictionary(Key key, TValue value)
+        public void SetOrUpdateValue<TState>(Key key, Func<TValue, TState, TValue> updater, TState state)
+        {
+            if (_dictionary != null)
+            {
+                _dictionary.SetOrUpdateValue(key, updater, state);
+            }
+            else if (_list != null)
+            {
+                _list.SetOrUpdateValue(key, updater, state);
+            }
+            else
+            {
+                _list = new ListDictionary<TValue>(key, updater(default, state), _checkExistingKeys);
+            }
+        }
+
+        private bool SwitchToDictionary(Key key, TValue value, bool tryAdd)
         {
             var dictionary = new StringDictionarySlim<TValue>(InitialDictionarySize);
             foreach (var pair in _list)
@@ -83,15 +105,46 @@ namespace Jint.Collections
                 dictionary[pair.Key] = pair.Value;
             }
 
-            dictionary[key] = value;
+            bool result;
+            if (tryAdd)
+            {
+                result = dictionary.TryAdd(key, value);
+            }
+            else
+            {
+                dictionary[key] = value;
+                result = true;
+            }
             _dictionary = dictionary;
             _list = null;
+            return result;
         }
 
         public int Count
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get => _dictionary?.Count ?? _list?.Count ?? 0;
+        }
+
+        public bool TryAdd(Key key, TValue value)
+        {
+            if (_dictionary != null)
+            {
+                return _dictionary.TryAdd(key, value);
+            }
+            else
+            {
+                _list ??= new ListDictionary<TValue>(key, value, _checkExistingKeys);
+
+                if (_list.Count + 1 >= CutoverPoint)
+                {
+                    return SwitchToDictionary(key, value, tryAdd: true);
+                }
+                else
+                {
+                    return _list.Add(key, value, tryAdd: true);
+                }
+            }
         }
 
         public void Add(Key key, TValue value)
@@ -110,7 +163,7 @@ namespace Jint.Collections
                 {
                     if (_list.Count + 1 >= CutoverPoint)
                     {
-                        SwitchToDictionary(key, value);
+                        SwitchToDictionary(key, value, tryAdd: false);
                     }
                     else
                     {
@@ -122,19 +175,8 @@ namespace Jint.Collections
 
         public void Clear()
         {
-            if (_dictionary != null)
-            {
-                var dictionary = _dictionary;
-                _dictionary = null;
-                dictionary.Clear();
-            }
-
-            if (_list != null)
-            {
-                var cachedList = _list;
-                _list = null;
-                cachedList.Clear();
-            }
+            _dictionary?.Clear();
+            _list?.Clear();
         }
 
         public bool ContainsKey(Key key)
@@ -144,10 +186,9 @@ namespace Jint.Collections
                 return _dictionary.ContainsKey(key);
             }
 
-            var cachedList = _list;
-            if (cachedList != null)
+            if (_list != null)
             {
-                return cachedList.ContainsKey(key);
+                return _list.ContainsKey(key);
             }
 
             return false;
@@ -165,7 +206,7 @@ namespace Jint.Collections
                 return _list.GetEnumerator();
             }
 
-            return Enumerable.Empty<KeyValuePair<Key, TValue>>().GetEnumerator();
+            return System.Linq.Enumerable.Empty<KeyValuePair<Key, TValue>>().GetEnumerator();
 
         }
 
@@ -181,7 +222,7 @@ namespace Jint.Collections
                 return _list.GetEnumerator();
             }
 
-            return Enumerable.Empty<KeyValuePair<Key, TValue>>().GetEnumerator();
+            return System.Linq.Enumerable.Empty<KeyValuePair<Key, TValue>>().GetEnumerator();
         }
 
         public bool Remove(Key key)
@@ -193,7 +234,7 @@ namespace Jint.Collections
 
             return _list != null && _list.Remove(key);
         }
-        
+
         /// <summary>
         /// Optimization when no need to check for existing items.
         /// </summary>

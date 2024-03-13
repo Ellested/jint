@@ -1,168 +1,318 @@
 using Esprima.Ast;
+using Jint.Extensions;
 using Jint.Native;
-using Jint.Runtime.Environments;
-using Jint.Runtime.References;
+using Jint.Runtime.Interop;
+using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
+using System.Reflection;
+using Environment = Jint.Runtime.Environments.Environment;
 
 namespace Jint.Runtime.Interpreter.Expressions
 {
     internal sealed class JintUnaryExpression : JintExpression
     {
+        private readonly record struct OperatorKey(string OperatorName, Type Operand);
+        private static readonly ConcurrentDictionary<OperatorKey, MethodDescriptor?> _knownOperators = new();
+
         private readonly JintExpression _argument;
         private readonly UnaryOperator _operator;
 
-        private JintUnaryExpression(Engine engine, UnaryExpression expression) : base(engine, expression)
+        private JintUnaryExpression(UnaryExpression expression) : base(expression)
         {
-            _argument = Build(engine, expression.Argument);
+            _argument = Build(expression.Argument);
             _operator = expression.Operator;
         }
 
-        internal static JintExpression Build(Engine engine, UnaryExpression expression)
+        internal static JintExpression Build(UnaryExpression expression)
         {
-            if (expression.Operator == UnaryOperator.Minus
-                && expression.Argument is Literal literal)
+            if (expression.Operator == UnaryOperator.TypeOf)
+            {
+                return new JintTypeOfExpression(expression);
+            }
+
+            return BuildConstantExpression(expression) ?? new JintUnaryExpression(expression);
+        }
+
+        internal static JintExpression? BuildConstantExpression(UnaryExpression expression)
+        {
+            if (expression is { Operator: UnaryOperator.Minus, Argument: Literal literal })
             {
                 var value = JintLiteralExpression.ConvertToJsValue(literal);
-                if (!(value is null))
+                if (value is not null)
                 {
                     // valid for caching
-                    return new JintConstantExpression(engine, expression, EvaluateMinus(value));
+                    var evaluatedValue = EvaluateMinus(value);
+                    return new JintConstantExpression(expression, evaluatedValue);
                 }
             }
 
-            return new JintUnaryExpression(engine, expression);
+            return null;
         }
 
-        public override JsValue GetValue()
+        private sealed class JintTypeOfExpression : JintExpression
+        {
+            private readonly JintExpression _argument;
+
+            public JintTypeOfExpression(UnaryExpression expression) : base(expression)
+            {
+                _argument = Build(expression.Argument);
+            }
+
+            public override JsValue GetValue(EvaluationContext context)
+            {
+                // need to notify correct node when taking shortcut
+                context.LastSyntaxElement = _expression;
+                return (JsValue) EvaluateInternal(context);
+            }
+
+            protected override object EvaluateInternal(EvaluationContext context)
+            {
+                var engine = context.Engine;
+                var result = _argument.Evaluate(context);
+                JsValue v;
+
+                if (result is Reference rf)
+                {
+                    if (rf.IsUnresolvableReference)
+                    {
+                        engine._referencePool.Return(rf);
+                        return JsString.UndefinedString;
+                    }
+
+                    v = engine.GetValue(rf, returnReferenceToPool: true);
+                }
+                else
+                {
+                    v = (JsValue) result;
+                }
+
+                return GetTypeOfString(v);
+            }
+
+            private static JsString GetTypeOfString(JsValue v)
+            {
+                if (v.IsUndefined())
+                {
+                    return JsString.UndefinedString;
+                }
+
+                if (v.IsNull())
+                {
+                    return JsString.ObjectString;
+                }
+
+                switch (v.Type)
+                {
+                    case Types.Boolean: return JsString.BooleanString;
+                    case Types.Number: return JsString.NumberString;
+                    case Types.BigInt: return JsString.BigIntString;
+                    case Types.String: return JsString.StringString;
+                    case Types.Symbol: return JsString.SymbolString;
+                }
+
+                if (v.IsCallable)
+                {
+                    return JsString.FunctionString;
+                }
+
+                return JsString.ObjectString;
+            }
+        }
+
+        public override JsValue GetValue(EvaluationContext context)
         {
             // need to notify correct node when taking shortcut
-            _engine._lastSyntaxNode = _expression;
-
-            return (JsValue) EvaluateInternal();
+            context.LastSyntaxElement = _expression;
+            return EvaluateJsValue(context);
         }
 
-        protected override object EvaluateInternal()
+        protected override object EvaluateInternal(EvaluationContext context)
         {
+            return EvaluateJsValue(context);
+        }
+
+        private JsValue EvaluateJsValue(EvaluationContext context)
+        {
+            var engine = context.Engine;
             switch (_operator)
             {
                 case UnaryOperator.Plus:
-                    var plusValue = _argument.GetValue();
-                    return plusValue.IsInteger() && plusValue.AsInteger() != 0
-                        ? plusValue
-                        : JsNumber.Create(TypeConverter.ToNumber(plusValue));
+                {
+                    var v = _argument.GetValue(context);
+                    if (context.OperatorOverloadingAllowed &&
+                        TryOperatorOverloading(context, v, "op_UnaryPlus", out var result))
+                    {
+                        return result;
+                    }
 
+                    return TypeConverter.ToNumber(v);
+                }
                 case UnaryOperator.Minus:
-                    return EvaluateMinus(_argument.GetValue());
+                {
+                    var v = _argument.GetValue(context);
+                    if (context.OperatorOverloadingAllowed &&
+                        TryOperatorOverloading(context, v, "op_UnaryNegation", out var result))
+                    {
+                        return result;
+                    }
 
+                    return EvaluateMinus(v);
+                }
                 case UnaryOperator.BitwiseNot:
-                    return JsNumber.Create(~TypeConverter.ToInt32(_argument.GetValue()));
+                {
+                    var v = _argument.GetValue(context);
+                    if (context.OperatorOverloadingAllowed &&
+                        TryOperatorOverloading(context, v, "op_OnesComplement", out var result))
+                    {
+                        return result;
+                    }
 
+                    var value = TypeConverter.ToNumeric(v);
+                    if (value.IsNumber())
+                    {
+                        return JsNumber.Create(~TypeConverter.ToInt32(value));
+                    }
+
+                    return JsBigInt.Create(~value.AsBigInt());
+                }
                 case UnaryOperator.LogicalNot:
-                    return !TypeConverter.ToBoolean(_argument.GetValue()) ? JsBoolean.True : JsBoolean.False;
+                {
+                    var v = _argument.GetValue(context);
+                    if (context.OperatorOverloadingAllowed &&
+                        TryOperatorOverloading(context, v, "op_LogicalNot", out var result))
+                    {
+                        return result;
+                    }
+
+                    return !TypeConverter.ToBoolean(v) ? JsBoolean.True : JsBoolean.False;
+                }
 
                 case UnaryOperator.Delete:
-                    var r = _argument.Evaluate() as Reference;
-                    if (r == null)
+                    // https://262.ecma-international.org/5.1/#sec-11.4.1
+                    if (_argument.Evaluate(context) is not Reference r)
                     {
                         return JsBoolean.True;
                     }
 
-                    if (r.IsUnresolvableReference())
+                    if (r.IsUnresolvableReference)
                     {
-                        if (r.IsStrictReference())
+                        if (r.Strict)
                         {
-                            ExceptionHelper.ThrowSyntaxError(_engine);
+                            ExceptionHelper.ThrowSyntaxError(engine.Realm, "Delete of an unqualified identifier in strict mode.");
                         }
 
-                        _engine._referencePool.Return(r);
+                        engine._referencePool.Return(r);
                         return JsBoolean.True;
                     }
 
-                    if (r.IsPropertyReference())
+                    var referencedName = r.ReferencedName;
+                    if (r.IsPropertyReference)
                     {
-                        var o = TypeConverter.ToObject(_engine, r.GetBase());
-                        var deleteStatus  = o.Delete(r.GetReferencedName());
-                        if (!deleteStatus && r.IsStrictReference())
+                        if (r.IsSuperReference)
                         {
-                            ExceptionHelper.ThrowTypeError(_engine);
+                            ExceptionHelper.ThrowReferenceError(engine.Realm, r);
                         }
 
-                        _engine._referencePool.Return(r);
+                        var o = TypeConverter.ToObject(engine.Realm, r.Base);
+                        var deleteStatus = o.Delete(referencedName);
+                        if (!deleteStatus)
+                        {
+                            if (r.Strict)
+                            {
+                                ExceptionHelper.ThrowTypeError(engine.Realm, $"Cannot delete property '{referencedName}' of {o}");
+                            }
+
+                            if (StrictModeScope.IsStrictModeCode && !r.Base.AsObject().GetProperty(referencedName).Configurable)
+                            {
+                                ExceptionHelper.ThrowTypeError(engine.Realm, $"Cannot delete property '{referencedName}' of {o}");
+                            }
+                        }
+
+                        engine._referencePool.Return(r);
                         return deleteStatus ? JsBoolean.True : JsBoolean.False;
                     }
 
-                    if (r.IsStrictReference())
+                    if (r.Strict)
                     {
-                        ExceptionHelper.ThrowSyntaxError(_engine);
+                        ExceptionHelper.ThrowSyntaxError(engine.Realm);
                     }
 
-                    var bindings = r.GetBase().TryCast<EnvironmentRecord>();
-                    var property = r.GetReferencedName();
-                    _engine._referencePool.Return(r);
+                    var bindings = (Environment) r.Base;
+                    var property = referencedName;
+                    engine._referencePool.Return(r);
 
                     return bindings.DeleteBinding(property.ToString()) ? JsBoolean.True : JsBoolean.False;
 
                 case UnaryOperator.Void:
-                    _argument.GetValue();
-                    return Undefined.Instance;
-
-                case UnaryOperator.TypeOf:
-                    var value = _argument.Evaluate();
-                    r = value as Reference;
-                    if (r != null)
-                    {
-                        if (r.IsUnresolvableReference())
-                        {
-                            _engine._referencePool.Return(r);
-                            return JsString.UndefinedString;
-                        }
-                    }
-
-                    var v = _argument.GetValue();
-
-                    if (v.IsUndefined())
-                    {
-                        return JsString.UndefinedString;
-                    }
-
-                    if (v.IsNull())
-                    {
-                        return JsString.ObjectString;
-                    }
-
-                    switch (v.Type)
-                    {
-                        case Types.Boolean: return JsString.BooleanString;
-                        case Types.Number: return JsString.NumberString;
-                        case Types.String: return JsString.StringString;
-                        case Types.Symbol: return JsString.SymbolString;
-                    }
-
-                    if (v.IsCallable)
-                    {
-                        return JsString.FunctionString;
-                    }
-
-                    return JsString.ObjectString;
+                    _argument.GetValue(context);
+                    return JsValue.Undefined;
 
                 default:
-                    return ExceptionHelper.ThrowArgumentException<object>();
+                    ExceptionHelper.ThrowArgumentException();
+                    return null;
             }
         }
 
-        private static JsNumber EvaluateMinus(JsValue value)
+        internal static JsValue EvaluateMinus(JsValue value)
         {
-            var minusValue = value;
-            if (minusValue.IsInteger())
+            if (value.IsInteger())
             {
-                var asInteger = minusValue.AsInteger();
+                var asInteger = value.AsInteger();
                 if (asInteger != 0)
                 {
                     return JsNumber.Create(asInteger * -1);
                 }
             }
 
-            var n = TypeConverter.ToNumber(minusValue);
-            return JsNumber.Create(double.IsNaN(n) ? double.NaN : n * -1);
+            value = TypeConverter.ToNumeric(value);
+            if (value.IsNumber())
+            {
+                var n = ((JsNumber) value)._value;
+                return double.IsNaN(n) ? JsNumber.DoubleNaN : JsNumber.Create(n * -1);
+            }
+
+            var bigInt = value.AsBigInt();
+            return JsBigInt.Create(BigInteger.Negate(bigInt));
+        }
+
+        internal static bool TryOperatorOverloading(EvaluationContext context, JsValue value, string clrName, [NotNullWhen(true)] out JsValue? result)
+        {
+            var operand = value.ToObject();
+
+            if (operand != null)
+            {
+                var operandType = operand.GetType();
+                var arguments = new[] { value };
+
+                var key = new OperatorKey(clrName, operandType);
+                var method = _knownOperators.GetOrAdd(key, _ =>
+                {
+                    MethodInfo? foundMethod = null;
+                    foreach (var x in operandType.GetOperatorOverloadMethods())
+                    {
+                        if (string.Equals(x.Name, clrName, StringComparison.Ordinal) && x.GetParameters().Length == 1)
+                        {
+                            foundMethod = x;
+                            break;
+                        }
+                    }
+
+                    if (foundMethod != null)
+                    {
+                        return new MethodDescriptor(foundMethod);
+                    }
+                    return null;
+                });
+
+                if (method != null)
+                {
+                    result = method.Call(context.Engine, null, arguments);
+                    return true;
+                }
+            }
+            result = null;
+            return false;
         }
     }
 }

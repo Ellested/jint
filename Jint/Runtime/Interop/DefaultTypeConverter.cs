@@ -1,12 +1,20 @@
-﻿using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Dynamic;
+using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using Jint.Extensions;
 using Jint.Native;
+using Jint.Native.Function;
+using Jint.Native.Object;
+using Jint.Runtime.Descriptors;
+
+#pragma warning disable IL2026
+#pragma warning disable IL2067
+#pragma warning disable IL2070
+#pragma warning disable IL2072
+#pragma warning disable IL3050
 
 namespace Jint.Runtime.Interop
 {
@@ -14,13 +22,10 @@ namespace Jint.Runtime.Interop
     {
         private readonly Engine _engine;
 
-#if NETSTANDARD
-        private static readonly ConcurrentDictionary<(Type Source, Type Target), bool> _knownConversions = new ConcurrentDictionary<(Type Source, Type Target), bool>();
-#else
-        private static readonly ConcurrentDictionary<string, bool> _knownConversions = new ConcurrentDictionary<string, bool>();
-#endif
+        private readonly record struct TypeConversionKey(Type Source, Type Target);
 
-        private static readonly Type nullableType = typeof(Nullable<>);
+        private static readonly ConcurrentDictionary<TypeConversionKey, MethodInfo?> _knownCastOperators = new();
+
         private static readonly Type intType = typeof(int);
         private static readonly Type iCallableType = typeof(Func<JsValue, JsValue[], JsValue>);
         private static readonly Type jsValueType = typeof(JsValue);
@@ -28,9 +33,9 @@ namespace Jint.Runtime.Interop
         private static readonly Type engineType = typeof(Engine);
         private static readonly Type typeType = typeof(Type);
 
-        private static readonly MethodInfo convertChangeType = typeof(Convert).GetMethod("ChangeType", new [] { objectType, typeType, typeof(IFormatProvider) });
-        private static readonly MethodInfo jsValueFromObject = jsValueType.GetMethod(nameof(JsValue.FromObject));
-        private static readonly MethodInfo jsValueToObject = jsValueType.GetMethod(nameof(JsValue.ToObject));
+        private static readonly MethodInfo convertChangeType = typeof(Convert).GetMethod("ChangeType", new[] { objectType, typeType, typeof(IFormatProvider) })!;
+        private static readonly MethodInfo jsValueFromObject = jsValueType.GetMethod(nameof(JsValue.FromObject))!;
+        private static readonly MethodInfo jsValueToObject = jsValueType.GetMethod(nameof(JsValue.ToObject))!;
 
 
         public DefaultTypeConverter(Engine engine)
@@ -38,27 +43,68 @@ namespace Jint.Runtime.Interop
             _engine = engine;
         }
 
-        public virtual object Convert(object value, Type type, IFormatProvider formatProvider)
+        public virtual object? Convert(
+            object? value,
+            [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicFields)] Type type,
+            IFormatProvider formatProvider)
         {
-            if (value == null)
+            if (!TryConvert(value, type, formatProvider, propagateException: true, out var converted, out var problemMessage))
             {
-                if (TypeConverter.TypeIsNullable(type))
+                ExceptionHelper.ThrowError(_engine, problemMessage ?? $"Unable to convert {value} to type {type}");
+            }
+            return converted;
+        }
+
+        public virtual bool TryConvert(object? value,
+            [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicFields)] Type type,
+            IFormatProvider formatProvider,
+            [NotNullWhen(true)] out object? converted)
+        {
+            return TryConvert(value, type, formatProvider, propagateException: false, out converted, out _);
+        }
+
+        private bool TryConvert(
+            object? value,
+            [DynamicallyAccessedMembers(InteropHelper.DefaultDynamicallyAccessedMemberTypes)] Type type,
+            IFormatProvider formatProvider,
+            bool propagateException,
+            out object? converted,
+            out string? problemMessage)
+        {
+            converted = null;
+            problemMessage = null;
+
+            if (value is null)
+            {
+                if (InteropHelper.TypeIsNullable(type))
                 {
-                    return null;
+                    return true;
                 }
 
-                ExceptionHelper.ThrowNotSupportedException($"Unable to convert null to '{type.FullName}'");
+                problemMessage = $"Unable to convert null to '{type.FullName}'";
+                return false;
             }
 
             // don't try to convert if value is derived from type
             if (type.IsInstanceOfType(value))
             {
-                return value;
+                converted = value;
+                return true;
             }
 
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == nullableType)
+            if (type.IsGenericType)
             {
-                type = Nullable.GetUnderlyingType(type);
+                var result = InteropHelper.IsAssignableToGenericType(value.GetType(), type);
+                if (result.IsAssignable)
+                {
+                    converted = value;
+                    return true;
+                }
+            }
+
+            if (type.IsNullable())
+            {
+                type = Nullable.GetUnderlyingType(type)!;
             }
 
             if (type.IsEnum)
@@ -69,133 +115,34 @@ namespace Jint.Runtime.Interop
                     ExceptionHelper.ThrowArgumentOutOfRangeException();
                 }
 
-                return Enum.ToObject(type, integer);
+                converted = Enum.ToObject(type, integer);
+                return true;
             }
 
             var valueType = value.GetType();
+
             // is the javascript value an ICallable instance ?
             if (valueType == iCallableType)
             {
-                var function = (Func<JsValue, JsValue[], JsValue>)value;
-
-                if (type.IsGenericType)
+                if (typeof(Delegate).IsAssignableFrom(type) && !type.IsAbstract)
                 {
-                    var genericType = type.GetGenericTypeDefinition();
+                    // use target function instance as cache holder, this way delegate and target hold same lifetime
+                    var delegatePropertyKey = "__jint_delegate_" + type.GUID;
 
-                    // create the requested Delegate
-                    if (genericType.Name.StartsWith("Action"))
+                    var func = (Func<JsValue, JsValue[], JsValue>) value;
+                    var functionInstance = func.Target as Function;
+
+                    var d = functionInstance?.GetHiddenClrObjectProperty(delegatePropertyKey) as Delegate;
+
+                    if (d is null)
                     {
-                        var genericArguments = type.GetGenericArguments();
-
-                        var @params = new ParameterExpression[genericArguments.Length];
-                        for (var i = 0; i < @params.Length; i++)
-                        {
-                            @params[i] = Expression.Parameter(genericArguments[i], genericArguments[i].Name + i);
-                        }
-                        var tmpVars = new Expression[@params.Length];
-                        for (var i = 0; i < @params.Length; i++)
-                        {
-                            var param = @params[i];
-                            if (param.Type.IsValueType)
-                            {
-                                var boxing = Expression.Convert(param, objectType);
-                                tmpVars[i] = Expression.Call(null, jsValueFromObject, Expression.Constant(_engine, engineType), boxing);
-                            }
-                            else
-                            {
-                                tmpVars[i] = Expression.Call(null, jsValueFromObject, Expression.Constant(_engine, engineType), param);
-                            }
-                        }
-                        var @vars = Expression.NewArrayInit(jsValueType, tmpVars);
-
-                        var callExpresion = Expression.Block(Expression.Call(
-                                                Expression.Call(Expression.Constant(function.Target),
-                                                    function.Method,
-                                                    Expression.Constant(JsValue.Undefined, jsValueType),
-                                                    @vars),
-                                                jsValueToObject), Expression.Empty());
-
-                        return Expression.Lambda(callExpresion, new ReadOnlyCollection<ParameterExpression>(@params)).Compile();
+                        d = BuildDelegate(type, func);
+                        functionInstance?.SetHiddenClrObjectProperty(delegatePropertyKey, d);
                     }
-                    else if (genericType.Name.StartsWith("Func"))
-                    {
-                        var genericArguments = type.GetGenericArguments();
-                        var returnType = genericArguments[genericArguments.Length - 1];
 
-                        var @params = new ParameterExpression[genericArguments.Length - 1];
-                        for (var i = 0; i < @params.Length; i++)
-                        {
-                            @params[i] = Expression.Parameter(genericArguments[i], genericArguments[i].Name + i);
-                        }
-
-                        var initializers = new MethodCallExpression[@params.Length];
-                        for (int i = 0; i < @params.Length; i++)
-                        {
-                            var boxingExpression = Expression.Convert(@params[i], objectType);
-                            initializers[i]= Expression.Call(null, jsValueFromObject, Expression.Constant(_engine, engineType), boxingExpression);
-                        }
-                        var @vars = Expression.NewArrayInit(jsValueType, initializers);
-
-                        // the final result's type needs to be changed before casting,
-                        // for instance when a function returns a number (double) but C# expects an integer
-
-                        var callExpresion = Expression.Convert(
-                                                Expression.Call(null,
-                                                    convertChangeType,
-                                                    Expression.Call(
-                                                            Expression.Call(Expression.Constant(function.Target),
-                                                                    function.Method,
-                                                                    Expression.Constant(JsValue.Undefined, jsValueType),
-                                                                    @vars),
-                                                            jsValueToObject),
-                                                        Expression.Constant(returnType, typeType),
-                                                        Expression.Constant(System.Globalization.CultureInfo.InvariantCulture, typeof(IFormatProvider))
-                                                        ),
-                                                    returnType);
-
-                        return Expression.Lambda(callExpresion, new ReadOnlyCollection<ParameterExpression>(@params)).Compile();
-                    }
+                    converted = d;
+                    return true;
                 }
-                else
-                {
-                    if (type == typeof(Action))
-                    {
-                        return (Action)(() => function(JsValue.Undefined, System.Array.Empty<JsValue>()));
-                    }
-                    else if (typeof(MulticastDelegate).IsAssignableFrom(type))
-                    {
-                        var method = type.GetMethod("Invoke");
-                        var arguments = method.GetParameters();
-
-                        var @params = new ParameterExpression[arguments.Length];
-                        for (var i = 0; i < @params.Length; i++)
-                        {
-                            @params[i] = Expression.Parameter(objectType, arguments[i].Name);
-                        }
-
-                        var initializers = new MethodCallExpression[@params.Length];
-                        for (int i = 0; i < @params.Length; i++)
-                        {
-                            initializers[i] = Expression.Call(null, jsValueType.GetMethod("FromObject"), Expression.Constant(_engine, engineType), @params[i]);
-                        }
-
-                        var @vars = Expression.NewArrayInit(jsValueType, initializers);
-
-                        var callExpression = Expression.Block(
-                                                Expression.Call(
-                                                    Expression.Call(Expression.Constant(function.Target),
-                                                        function.Method,
-                                                        Expression.Constant(JsValue.Undefined, jsValueType),
-                                                        @vars),
-                                                    jsValueType.GetMethod("ToObject")),
-                                                Expression.Empty());
-
-                        var dynamicExpression = Expression.Invoke(Expression.Lambda(callExpression, new ReadOnlyCollection<ParameterExpression>(@params)), new ReadOnlyCollection<ParameterExpression>(@params));
-
-                        return Expression.Lambda(type, dynamicExpression, new ReadOnlyCollection<ParameterExpression>(@params)).Compile();
-                    }
-                }
-
             }
 
             if (type.IsArray)
@@ -203,32 +150,39 @@ namespace Jint.Runtime.Interop
                 var source = value as object[];
                 if (source == null)
                 {
-                    ExceptionHelper.ThrowArgumentException($"Value of object[] type is expected, but actual type is {value.GetType()}.");
+                    problemMessage = $"Value of object[] type is expected, but actual type is {value.GetType()}";
+                    return false;
                 }
 
-                var targetElementType = type.GetElementType();
-                var itemsConverted = new object[source.Length];
-                for (int i = 0; i < source.Length; i++)
+                var targetElementType = type.GetElementType()!;
+                var itemsConverted = new object?[source.Length];
+                for (var i = 0; i < source.Length; i++)
                 {
                     itemsConverted[i] = Convert(source[i], targetElementType, formatProvider);
                 }
                 var result = Array.CreateInstance(targetElementType, source.Length);
                 itemsConverted.CopyTo(result, 0);
-                return result;
+
+                converted = result;
+                return true;
             }
 
-            if (value is ExpandoObject eObj)
+            var typeDescriptor = TypeDescriptor.Get(valueType);
+            if (typeDescriptor.IsStringKeyedGenericDictionary)
             {
                 // public empty constructor required
                 var constructors = type.GetConstructors();
                 // value types
                 if (type.IsValueType && constructors.Length > 0)
                 {
-                    return null;
+                    problemMessage = $"No valid constructors found for {type}";
+                    return false;
                 }
 
+                var constructorParameters = Array.Empty<object>();
+
                 // reference types - return null if no valid constructor is found
-                if(!type.IsValueType)
+                if (!type.IsValueType)
                 {
                     var found = false;
                     foreach (var constructor in constructors)
@@ -242,13 +196,26 @@ namespace Jint.Runtime.Interop
 
                     if (!found)
                     {
-                        // found no valid constructor
-                        return null;
+                        foreach (var constructor in constructors)
+                        {
+                            var parameterInfos = constructor.GetParameters();
+                            if (parameterInfos.All(static p => p.IsOptional) && constructor.IsPublic)
+                            {
+                                constructorParameters = new object[parameterInfos.Length];
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!found)
+                    {
+                        problemMessage = $"No valid constructors found for type {type}";
+                        return false;
                     }
                 }
 
-                var dict = (IDictionary<string, object>) eObj;
-                var obj = Activator.CreateInstance(type, System.Array.Empty<object>());
+                var obj = Activator.CreateInstance(type, constructorParameters)!;
 
                 var members = type.GetMembers();
                 foreach (var member in members)
@@ -260,48 +227,151 @@ namespace Jint.Runtime.Interop
                         continue;
                     }
 
-                    var name = member.Name.UpperToLowerCamelCase();
-                    if (dict.TryGetValue(name, out var val))
+                    if (typeDescriptor.TryGetValue(value, member.Name, out var val)
+                        || typeDescriptor.TryGetValue(value, member.Name.UpperToLowerCamelCase(), out val))
                     {
                         var output = Convert(val, member.GetDefinedType(), formatProvider);
                         member.SetValue(obj, output);
                     }
                 }
 
-                return obj;
+                converted = obj;
+                return true;
             }
 
-            return System.Convert.ChangeType(value, type, formatProvider);
+            try
+            {
+                converted = System.Convert.ChangeType(value, type, formatProvider);
+                return true;
+            }
+            catch (Exception e)
+            {
+                // check if we can do a cast with operator overloading
+                if (TryCastWithOperators(value, type, valueType, out var invoke))
+                {
+                    converted = invoke;
+                    return true;
+                }
+
+                if (propagateException && !_engine.Options.Interop.ExceptionHandler(e))
+                {
+                    throw;
+                }
+
+                problemMessage = e.Message;
+                return false;
+            }
         }
 
-        public virtual bool TryConvert(object value, Type type, IFormatProvider formatProvider, out object converted)
+        private Delegate BuildDelegate(
+            [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods)] Type type,
+            Func<JsValue, JsValue[], JsValue> function)
         {
-#if NETSTANDARD
-            var key = value == null ? (null, type) : (value.GetType(), type);
-#else
-            var key = value == null ? $"Null->{type}" : $"{value.GetType()}->{type}";
-#endif
+            var method = type.GetMethod("Invoke");
+            var arguments = method!.GetParameters();
 
-            // string conversion is not stable, "filter" -> int is invalid, "0" -> int is valid
-            var canConvert = value is string || _knownConversions.GetOrAdd(key, _ =>
+            var parameters = new ParameterExpression[arguments.Length];
+            for (var i = 0; i < parameters.Length; i++)
+            {
+                parameters[i] = Expression.Parameter(arguments[i].ParameterType, arguments[i].Name);
+            }
+
+            var initializers = new List<MethodCallExpression>(parameters.Length);
+
+            for (var i = 0; i < parameters.Length; i++)
+            {
+                var param = parameters[i];
+                if (param.Type.IsValueType)
+                {
+                    var boxing = Expression.Convert(param, objectType);
+                    initializers.Add(Expression.Call(null, jsValueFromObject, Expression.Constant(_engine, engineType), boxing));
+                }
+                else if (param.Type.IsArray &&
+                         arguments[i].GetCustomAttribute<ParamArrayAttribute>() is not null &&
+                         function.Target is Function instance)
+                {
+                    for (var j = 0; j < instance.GetLength(); j++)
+                    {
+                        var returnLabel = Expression.Label(typeof(object));
+                        var checkIndex = Expression.GreaterThanOrEqual(Expression.Property(param, nameof(Array.Length)), Expression.Constant(j));
+                        var condition = Expression.IfThen(checkIndex, Expression.Return(returnLabel, Expression.ArrayAccess(param, Expression.Constant(j))));
+                        var block = Expression.Block(condition, Expression.Label(returnLabel, Expression.Constant(JsValue.Undefined)));
+
+                        initializers.Add(Expression.Call(null, jsValueFromObject, Expression.Constant(_engine, engineType), block));
+                    }
+                }
+                else
+                {
+                    initializers.Add(Expression.Call(null, jsValueFromObject, Expression.Constant(_engine, engineType), param));
+                }
+            }
+
+            var vars = Expression.NewArrayInit(jsValueType, initializers);
+
+            var callExpression = Expression.Call(
+                Expression.Constant(function.Target),
+                function.Method,
+                Expression.Constant(JsValue.Undefined, jsValueType),
+                vars);
+
+            if (method.ReturnType != typeof(void))
+            {
+                return Expression.Lambda(
+                    type,
+                    Expression.Convert(
+                        Expression.Call(
+                            null,
+                            convertChangeType,
+                            Expression.Call(callExpression, jsValueToObject),
+                            Expression.Constant(method.ReturnType),
+                            Expression.Constant(System.Globalization.CultureInfo.InvariantCulture, typeof(IFormatProvider))
+                        ),
+                        method.ReturnType
+                    ),
+                    new ReadOnlyCollection<ParameterExpression>(parameters)).Compile();
+            }
+
+            return Expression.Lambda(
+                type,
+                callExpression,
+                new ReadOnlyCollection<ParameterExpression>(parameters)).Compile();
+        }
+
+        private static bool TryCastWithOperators(object value, Type type, Type valueType, [NotNullWhen(true)] out object? converted)
+        {
+            var key = new TypeConversionKey(valueType, type);
+
+            static MethodInfo? CreateValueFactory(TypeConversionKey k)
+            {
+                var (source, target) = k;
+                foreach (var m in source.GetOperatorOverloadMethods().Concat(target.GetOperatorOverloadMethods()))
+                {
+                    if (!target.IsAssignableFrom(m.ReturnType) || m.Name is not ("op_Implicit" or "op_Explicit"))
+                    {
+                        continue;
+                    }
+
+                    var parameters = m.GetParameters();
+                    if (parameters.Length != 1 || !parameters[0].ParameterType.IsAssignableFrom(source))
+                    {
+                        continue;
+                    }
+
+                    // we found a match
+                    return m;
+                }
+
+                return null;
+            }
+
+            var castOperator = _knownCastOperators.GetOrAdd(key, CreateValueFactory);
+
+            if (castOperator != null)
             {
                 try
                 {
-                    Convert(value, type, formatProvider);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-            });
-
-            if (canConvert)
-            {
-                try
-                {
-                    converted = Convert(value, type, formatProvider);
-                    return true;
+                    converted = castOperator.Invoke(null, new[] { value });
+                    return converted is not null;
                 }
                 catch
                 {
@@ -312,6 +382,20 @@ namespace Jint.Runtime.Interop
 
             converted = null;
             return false;
+        }
+
+    }
+
+    internal static class ObjectExtensions
+    {
+        public static object? GetHiddenClrObjectProperty(this ObjectInstance obj, string name)
+        {
+            return (obj.Get(name) as IObjectWrapper)?.Target;
+        }
+
+        public static void SetHiddenClrObjectProperty(this ObjectInstance obj, string name, object value)
+        {
+            obj.SetOwnProperty(name, new PropertyDescriptor(new ObjectWrapper(obj.Engine, value), PropertyFlag.AllForbidden));
         }
     }
 }

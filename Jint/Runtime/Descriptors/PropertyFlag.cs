@@ -1,5 +1,3 @@
-﻿using System;
-
 namespace Jint.Runtime.Descriptors
 {
     [Flags]
@@ -17,6 +15,9 @@ namespace Jint.Runtime.Descriptors
 
         // we can check for mutable binding and do some fast assignments
         MutableBinding = 512,
+
+        // mark PropertyDescriptor as non data to accelerate IsDataDescriptor and avoid the side effect of CustomValue
+        NonData = 1024,
 
         // common helpers
         AllForbidden = ConfigurableSet | EnumerableSet | WritableSet,

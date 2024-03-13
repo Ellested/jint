@@ -1,14 +1,14 @@
-﻿using Jint.Runtime.CallStack;
+using Jint.Runtime.CallStack;
 
 namespace Jint.Runtime
 {
-    public class RecursionDepthOverflowException : JintException
+    public sealed class RecursionDepthOverflowException : JintException
     {
-        public string CallChain { get; private set; }
+        public string CallChain { get; }
 
-        public string CallExpressionReference { get; private set; }
+        public string CallExpressionReference { get; }
 
-        public RecursionDepthOverflowException(JintCallStack currentStack, string currentExpressionReference)
+        internal RecursionDepthOverflowException(JintCallStack currentStack, string currentExpressionReference)
             : base("The recursion is forbidden by script host.")
         {
             CallExpressionReference = currentExpressionReference;

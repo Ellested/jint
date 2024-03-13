@@ -1,61 +1,71 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
+using Esprima.Ast;
 
-namespace Jint.Benchmark
+namespace Jint.Benchmark;
+
+[MemoryDiagnoser]
+public class DromaeoBenchmark
 {
-    [MemoryDiagnoser]
-    public class DromaeoBenchmark
+    private static readonly Dictionary<string, string> _files = new()
     {
-        public static readonly Dictionary<string, string> files = new Dictionary<string, string>
+        {"dromaeo-3d-cube", null},
+        {"dromaeo-core-eval", null},
+        {"dromaeo-object-array", null},
+        {"dromaeo-object-regexp", null},
+        {"dromaeo-object-string", null},
+        {"dromaeo-string-base64", null}
+    };
+
+    private readonly Dictionary<string, Script> _prepared = new();
+
+    private Engine engine;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        foreach (var fileName in _files.Keys)
         {
-            {"dromaeo-3d-cube", null},
-            {"dromaeo-core-eval", null},
-            {"dromaeo-object-array", null},
-            {"dromaeo-object-regexp", null},
-            {"dromaeo-object-string", null},
-            {"dromaeo-string-base64", null}
-        };
+            var script = File.ReadAllText($"Scripts/{fileName}.js");
+            _files[fileName] = script;
+            _prepared[fileName] = Engine.PrepareScript(script);
+        }
 
-        private Engine engine;
+        engine = new Engine()
+            .SetValue("log", new Action<object>(Console.WriteLine))
+            .SetValue("assert", new Action<bool>(b => { }));
 
-        [GlobalSetup]
-        public void Setup()
-        {
-            foreach (var fileName in files.Keys.ToList())
-            {
-                files[fileName] = File.ReadAllText($"Scripts/dromaeo/{fileName}.js");
-            }
-
-            engine = new Engine()
-                .SetValue("log", new Action<object>(Console.WriteLine))
-                .SetValue("assert", new Action<bool>(b => { }));
-
-            engine.Execute(@"
+        engine.Execute(@"
 var startTest = function () { };
 var test = function (name, fn) { fn(); };
 var endTest = function () { };
 var prep = function (fn) { fn(); };
 ");
-        }
+    }
 
-        [ParamsSource(nameof(FileNames))]
-        public string FileName { get; set; }
+    [ParamsSource(nameof(FileNames))]
+    public string FileName { get; set; }
 
-        public IEnumerable<string> FileNames()
+    [Params(true, false)]
+    public bool Prepared { get; set; }
+
+    public IEnumerable<string> FileNames()
+    {
+        foreach (var entry in _files)
         {
-            foreach (var entry in files)
-            {
-                yield return entry.Key;
-            }
+            yield return entry.Key;
         }
+    }
 
-        [Benchmark]
-        public void Run()
+    [Benchmark]
+    public void Run()
+    {
+        if (Prepared)
         {
-            engine.Execute(files[FileName]);
+            engine.Execute(_prepared[FileName]);
+        }
+        else
+        {
+            engine.Execute(_files[FileName]);
         }
     }
 }

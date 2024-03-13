@@ -1,58 +1,47 @@
-﻿using Jint.Collections;
+using Jint.Collections;
 using Jint.Native.Symbol;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
 using Jint.Runtime.Interop;
 
-namespace Jint.Native.Iterator
+namespace Jint.Native.Iterator;
+
+/// <summary>
+/// https://tc39.es/ecma262/#sec-%iteratorprototype%-object
+/// </summary>
+internal class IteratorPrototype : Prototype
 {
-    internal sealed class IteratorPrototype : IteratorInstance
+    internal IteratorPrototype(
+        Engine engine,
+        Realm realm,
+        Prototype objectPrototype) : base(engine, realm)
     {
-        private string _name;
+        _prototype = objectPrototype;
+    }
 
-        private IteratorPrototype(Engine engine) : base(engine)
+    protected override void Initialize()
+    {
+        var symbols = new SymbolDictionary(1)
         {
+            [GlobalSymbolRegistry.Iterator] = new(new ClrFunction(Engine, "[Symbol.iterator]", ToIterator, 0, PropertyFlag.Configurable), true, false, true),
+        };
+        SetSymbols(symbols);
+    }
+
+    private static JsValue ToIterator(JsValue thisObject, JsValue[] arguments)
+    {
+        return thisObject;
+    }
+
+    internal JsValue Next(JsValue thisObject, JsValue[] arguments)
+    {
+        var iterator = thisObject as IteratorInstance;
+        if (iterator is null)
+        {
+            ExceptionHelper.ThrowTypeError(_engine.Realm);
         }
 
-        public static IteratorPrototype CreatePrototypeObject(Engine engine, string name, IteratorConstructor iteratorConstructor)
-        {
-            var obj = new IteratorPrototype(engine)
-            {
-                _prototype = engine.Object.PrototypeObject,
-                _name = name
-            };
-
-            return obj;
-        }
-
-        protected override void Initialize()
-        {
-            var properties = new PropertyDictionary(2, checkExistingKeys: false)
-            {
-                ["name"] = new PropertyDescriptor("Map", PropertyFlag.Configurable),
-                ["next"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "next", Next, 0, PropertyFlag.Configurable), true, false, true)
-            };
-            SetProperties(properties);
-
-            if (_name != null)
-            {
-                var symbols = new SymbolDictionary(1)
-                {
-                    [GlobalSymbolRegistry.ToStringTag] = new PropertyDescriptor(_name, PropertyFlag.Configurable)
-                };
-                SetSymbols(symbols);
-            }
-        }
-
-        private JsValue Next(JsValue thisObj, JsValue[] arguments)
-        {
-            if (!(thisObj is IteratorInstance iterator))
-            {
-                return ExceptionHelper.ThrowTypeError<JsValue>(_engine);
-            }
-
-            iterator.TryIteratorStep(out var result);
-            return result;
-        }
+        iterator.TryIteratorStep(out var result);
+        return result;
     }
 }

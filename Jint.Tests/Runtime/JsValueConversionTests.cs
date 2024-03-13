@@ -1,18 +1,21 @@
 ﻿using Jint.Native;
-using Jint.Native.Array;
-using Jint.Native.Date;
-using Jint.Native.Object;
-using Jint.Native.RegExp;
-using Xunit;
+using Jint.Runtime;
 
 namespace Jint.Tests.Runtime
 {
     public class JsValueConversionTests
     {
+        private readonly Engine _engine;
+
+        public JsValueConversionTests()
+        {
+            _engine = new Engine();
+        }
+
         [Fact]
         public void ShouldBeAnArray()
         {
-            var value = new ArrayInstance(null);
+            var value = new JsArray(_engine);
             Assert.Equal(false, value.IsBoolean());
             Assert.Equal(true, value.IsArray());
             Assert.Equal(false, value.IsDate());
@@ -30,7 +33,7 @@ namespace Jint.Tests.Runtime
         [Fact]
         public void ShouldBeABoolean()
         {
-            var value = new JsBoolean(true);
+            var value = JsBoolean.True;
             Assert.Equal(true, value.IsBoolean());
             Assert.Equal(false, value.IsArray());
             Assert.Equal(false, value.IsDate());
@@ -48,7 +51,7 @@ namespace Jint.Tests.Runtime
         [Fact]
         public void ShouldBeADate()
         {
-            var value = new DateInstance(null);
+            var value = new JsDate(_engine, double.NaN);
             Assert.Equal(false, value.IsBoolean());
             Assert.Equal(false, value.IsArray());
             Assert.Equal(true, value.IsDate());
@@ -66,7 +69,7 @@ namespace Jint.Tests.Runtime
         [Fact]
         public void ShouldBeNull()
         {
-            var value = Null.Instance;
+            var value = JsValue.Null;
             Assert.Equal(false, value.IsBoolean());
             Assert.Equal(false, value.IsArray());
             Assert.Equal(false, value.IsDate());
@@ -99,7 +102,7 @@ namespace Jint.Tests.Runtime
         [Fact]
         public void ShouldBeAnObject()
         {
-            var value = new ObjectInstance(null);
+            var value = new JsObject(_engine);
             Assert.Equal(false, value.IsBoolean());
             Assert.Equal(false, value.IsArray());
             Assert.Equal(false, value.IsDate());
@@ -116,7 +119,7 @@ namespace Jint.Tests.Runtime
         [Fact]
         public void ShouldBeARegExp()
         {
-            var value = new RegExpInstance(null);
+            var value = new JsRegExp(_engine);
             Assert.Equal(false, value.IsBoolean());
             Assert.Equal(false, value.IsArray());
             Assert.Equal(false, value.IsDate());
@@ -150,7 +153,7 @@ namespace Jint.Tests.Runtime
         [Fact]
         public void ShouldBeUndefined()
         {
-            var value = Undefined.Instance;
+            var value = JsValue.Undefined;
             Assert.Equal(false, value.IsBoolean());
             Assert.Equal(false, value.IsArray());
             Assert.Equal(false, value.IsDate());
@@ -161,6 +164,39 @@ namespace Jint.Tests.Runtime
             Assert.Equal(false, value.IsRegExp());
             Assert.Equal(false, value.IsString());
             Assert.Equal(true, value.IsUndefined());
+        }
+
+        [Fact]
+        public void ShouldConvertArrayBuffer()
+        {
+            var value = _engine.Evaluate("new Uint8Array([102, 111, 111]).buffer");
+            Assert.Equal(true, value.IsArrayBuffer());
+            Assert.Equal([102, 111, 111], value.AsArrayBuffer());
+            Assert.Equal([102, 111, 111], value.ToObject() as byte[]);
+
+            (value as JsArrayBuffer).DetachArrayBuffer();
+
+            Assert.Equal(true, value.IsArrayBuffer());
+            Assert.Equal(null, value.AsArrayBuffer());
+            Assert.Throws<JavaScriptException>(value.ToObject);
+            Assert.Throws<ArgumentException>(JsValue.Undefined.AsArrayBuffer);
+        }
+
+        [Fact]
+        public void ShouldConvertDataView()
+        {
+            var value = _engine.Evaluate("new DataView(new Uint8Array([102, 102, 111, 111, 111]).buffer, 1, 3)");
+
+            Assert.Equal(true, value.IsDataView());
+            Assert.Equal([102, 111, 111], value.AsDataView());
+            Assert.Equal([102, 111, 111], value.ToObject() as byte[]);
+
+            (value as JsDataView)._viewedArrayBuffer.DetachArrayBuffer();
+
+            Assert.Equal(true, value.IsDataView());
+            Assert.Equal(null, value.AsDataView());
+            Assert.Throws<JavaScriptException>(value.ToObject);
+            Assert.Throws<ArgumentException>(JsValue.Undefined.AsDataView);
         }
     }
 }

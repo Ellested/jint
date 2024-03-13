@@ -1,7 +1,6 @@
 using Esprima.Ast;
 using Jint.Native;
 using Jint.Runtime.Environments;
-using Jint.Runtime.References;
 
 namespace Jint.Runtime.Interpreter.Expressions
 {
@@ -10,82 +9,141 @@ namespace Jint.Runtime.Interpreter.Expressions
     /// </summary>
     internal sealed class JintMemberExpression : JintExpression
     {
-        private JintExpression _objectExpression;
-        private JintIdentifierExpression _objectIdentifierExpression;
-        private JintThisExpression _objectThisExpression;
+        private readonly MemberExpression _memberExpression;
+        private JintExpression _objectExpression = null!;
+        private JintExpression? _propertyExpression;
+        private JsValue? _determinedProperty;
+        private bool _initialized;
 
-        private JintExpression _propertyExpression;
-        private JsValue _determinedProperty;
+        private static readonly JsValue _nullMarker = new JsString("NULL MARKER");
 
-        public JintMemberExpression(Engine engine, MemberExpression expression) : base(engine, expression)
+        public JintMemberExpression(MemberExpression expression) : base(expression)
         {
-            _initialized = false;
+            _memberExpression = (MemberExpression) _expression;
         }
 
-        protected override void Initialize()
+        internal static JsValue InitializeDeterminedProperty(MemberExpression expression, bool cache)
         {
-            var expression = (MemberExpression) _expression;
-            _objectExpression = Build(_engine, expression.Object);
-            _objectIdentifierExpression = _objectExpression as JintIdentifierExpression;
-            _objectThisExpression = _objectExpression as JintThisExpression;
-
+            JsValue? property = null;
             if (!expression.Computed)
             {
-                _determinedProperty = ((Identifier) expression.Property).Name;
+                if (expression.Property is Identifier identifier)
+                {
+                    property = cache ? JsString.CachedCreate(identifier.Name) : JsString.Create(identifier.Name);
+                }
             }
             else if (expression.Property.Type == Nodes.Literal)
             {
-                _determinedProperty = JintLiteralExpression.ConvertToJsValue((Literal) expression.Property);
+                property = JintLiteralExpression.ConvertToJsValue((Literal) expression.Property);
             }
 
-            if (_determinedProperty is null)
-            {
-                _propertyExpression = Build(_engine, expression.Property);
-            }
+            return property ?? _nullMarker;
         }
 
-        protected override object EvaluateInternal()
+        protected override object EvaluateInternal(EvaluationContext context)
         {
-            string baseReferenceName = null;
-            JsValue baseValue = null;
+            if (!_initialized)
+            {
+                _objectExpression = Build(_memberExpression.Object);
+
+                _determinedProperty ??= _expression.AssociatedData as JsValue ?? InitializeDeterminedProperty(_memberExpression, cache: false);
+
+                if (ReferenceEquals(_determinedProperty, _nullMarker))
+                {
+                    _propertyExpression = Build(_memberExpression.Property);
+                    _determinedProperty = null;
+                }
+
+                _initialized = true;
+            }
+
+            JsValue? actualThis = null;
+            string? baseReferenceName = null;
+            JsValue? baseValue = null;
             var isStrictModeCode = StrictModeScope.IsStrictModeCode;
 
-            if (_objectIdentifierExpression != null)
+            var engine = context.Engine;
+            if (_objectExpression is JintIdentifierExpression identifierExpression)
             {
-                baseReferenceName = _objectIdentifierExpression._expressionName.Key.Name;
+                var identifier = identifierExpression.Identifier;
+                baseReferenceName = identifier.Key.Name;
                 var strict = isStrictModeCode;
-                var env = _engine.ExecutionContext.LexicalEnvironment;
-                LexicalEnvironment.TryGetIdentifierEnvironmentWithBindingValue(
+                var env = engine.ExecutionContext.LexicalEnvironment;
+                JintEnvironment.TryGetIdentifierEnvironmentWithBindingValue(
                     env,
-                    _objectIdentifierExpression._expressionName,
+                    identifier,
                     strict,
                     out _,
                     out baseValue);
             }
-            else if (_objectThisExpression != null)
+            else if (_objectExpression is JintThisExpression thisExpression)
             {
-                baseValue = _objectThisExpression.GetValue();
+                baseValue = (JsValue?) thisExpression.GetValue(context);
+            }
+            else if (_objectExpression is JintSuperExpression)
+            {
+                var env = (FunctionEnvironment) engine.ExecutionContext.GetThisEnvironment();
+                actualThis = env.GetThisBinding();
+                baseValue = env.GetSuperBase();
             }
 
             if (baseValue is null)
             {
                 // fast checks failed
-                var baseReference = _objectExpression.Evaluate();
+                var baseReference = _objectExpression.Evaluate(context);
+                if (ReferenceEquals(JsValue.Undefined, baseReference))
+                {
+                    return JsValue.Undefined;
+                }
                 if (baseReference is Reference reference)
                 {
-                    baseReferenceName = reference.GetReferencedName().ToString();
-                    baseValue = _engine.GetValue(reference, false);
-                    _engine._referencePool.Return(reference);
+                    baseReferenceName = reference.ReferencedName.ToString();
+                    baseValue = engine.GetValue(reference, false);
+                    engine._referencePool.Return(reference);
                 }
                 else
                 {
-                    baseValue = _engine.GetValue(baseReference, false);
+                    baseValue = engine.GetValue(baseReference, false);
                 }
             }
 
-            var property = _determinedProperty ?? _propertyExpression.GetValue();
-            TypeConverter.CheckObjectCoercible(_engine, baseValue, (MemberExpression) _expression, _determinedProperty?.ToString() ?? baseReferenceName);
-            return _engine._referencePool.Rent(baseValue,  TypeConverter.ToPropertyKey(property), isStrictModeCode);
+            if (baseValue.IsNullOrUndefined() && (_memberExpression.Optional || _objectExpression._expression.IsOptional()))
+            {
+                return JsValue.Undefined;
+            }
+
+            var property = _determinedProperty ?? _propertyExpression!.GetValue(context);
+            if (baseValue.IsNullOrUndefined())
+            {
+                // we can use base data types securely, object evaluation can mess things up
+                var referenceName = property.IsPrimitive()
+                    ? TypeConverter.ToString(property)
+                    : _determinedProperty?.ToString() ?? baseReferenceName;
+
+                TypeConverter.CheckObjectCoercible(engine, baseValue, _memberExpression.Property, referenceName!);
+            }
+
+            if (property.IsPrivateName())
+            {
+                return MakePrivateReference(engine, baseValue, property);
+            }
+
+            // only convert if necessary
+            var propertyKey = property.IsInteger() && baseValue.IsIntegerIndexedArray
+                ? property
+                : TypeConverter.ToPropertyKey(property);
+
+            return context.Engine._referencePool.Rent(baseValue, propertyKey, isStrictModeCode, thisValue: actualThis);
+        }
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-makeprivatereference
+        /// </summary>
+        private static Reference MakePrivateReference(Engine engine, JsValue baseValue, JsValue privateIdentifier)
+        {
+            var privEnv = engine.ExecutionContext.PrivateEnvironment;
+            var privateName = privEnv!.ResolvePrivateIdentifier(privateIdentifier.ToString());
+            return engine._referencePool.Rent(baseValue, privateName!, strict: true, thisValue: null);
         }
     }
 }

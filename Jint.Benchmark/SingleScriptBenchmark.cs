@@ -1,71 +1,34 @@
 ﻿using BenchmarkDotNet.Attributes;
+using Esprima.Ast;
 
-namespace Jint.Benchmark
+namespace Jint.Benchmark;
+
+[MemoryDiagnoser]
+public abstract class SingleScriptBenchmark
 {
-    [MemoryDiagnoser]
-    public abstract class SingleScriptBenchmark
+    private string _script;
+    private Script _parsedScript;
+
+    protected abstract string FileName { get; }
+
+    [GlobalSetup]
+    public void Setup()
     {
-        private Engine sharedJint;
+        _script = File.ReadAllText($"Scripts/{FileName}");
+        _parsedScript = Engine.PrepareScript(_script, strict: true);
+    }
 
-#if ENGINE_COMPARISON
-        private Jurassic.ScriptEngine sharedJurassic;
-        private NiL.JS.Core.Context sharedNilJs;
-#endif
+    [Benchmark]
+    public void Execute()
+    {
+        var engine = new Engine(static options => options.Strict());
+        engine.Execute(_script);
+    }
 
-        protected abstract string Script { get; }
-
-        [Params(10)]
-        public virtual int N { get; set; }
-
-        [GlobalSetup]
-        public void Setup()
-        {
-            sharedJint = new Engine();
-#if ENGINE_COMPARISON
-            sharedJurassic = new Jurassic.ScriptEngine();
-            sharedNilJs = new NiL.JS.Core.Context();
-#endif
-        }
-
-        [Benchmark]
-        public bool Jint()
-        {
-            bool done = false;
-            for (var i = 0; i < N; i++)
-            {
-                sharedJint.Execute(Script);
-                done |= sharedJint.GetValue("done").AsBoolean();
-            }
-
-            return done;
-        }
-
-#if ENGINE_COMPARISON
-        [Benchmark]
-        public bool Jurassic()
-        {
-            bool done = false;
-            for (var i = 0; i < N; i++)
-            {
-                sharedJurassic.Execute(Script);
-                done |= sharedJurassic.GetGlobalValue<bool>("done");
-            }
-
-            return done;
-        }
-
-        [Benchmark]
-        public bool NilJS()
-        {
-            bool done = false;
-            for (var i = 0; i < N; i++)
-            {
-                sharedNilJs.Eval(Script);
-                done |= (bool) sharedNilJs.GetVariable("done");
-            }
-
-            return done;
-        }
-#endif
+    [Benchmark]
+    public void Execute_ParsedScript()
+    {
+        var engine = new Engine(static options => options.Strict());
+        engine.Execute(_parsedScript);
     }
 }

@@ -1,8 +1,11 @@
-using System;
 using System.Globalization;
 using System.Reflection;
+using Jint.Extensions;
 using Jint.Native;
 using Jint.Native.Function;
+
+#pragma warning disable IL2072
+#pragma warning disable IL3050
 
 namespace Jint.Runtime.Interop
 {
@@ -10,17 +13,18 @@ namespace Jint.Runtime.Interop
     /// Represents a FunctionInstance wrapper around a CLR method. This is used by user to pass
     /// custom methods to the engine.
     /// </summary>
-    public sealed class DelegateWrapper : FunctionInstance
+    internal sealed class DelegateWrapper : Function
     {
         private static readonly JsString _name = new JsString("delegate");
         private readonly Delegate _d;
         private readonly bool _delegateContainsParamsArgument;
 
-        public DelegateWrapper(Engine engine, Delegate d)
-            : base(engine, _name, FunctionThisMode.Global)
+        public DelegateWrapper(
+            Engine engine, Delegate d)
+            : base(engine, engine.Realm, _name, FunctionThisMode.Global)
         {
             _d = d;
-            _prototype = engine.Function.PrototypeObject;
+            _prototype = engine.Realm.Intrinsics.Function.PrototypeObject;
 
             var parameterInfos = _d.Method.GetParameters();
 
@@ -35,7 +39,7 @@ namespace Jint.Runtime.Interop
             }
         }
 
-        public override JsValue Call(JsValue thisObject, JsValue[] jsArguments)
+        protected internal override JsValue Call(JsValue thisObject, JsValue[] arguments)
         {
             var parameterInfos = _d.Method.GetParameters();
 
@@ -52,27 +56,33 @@ namespace Jint.Runtime.Interop
             int delegateArgumentsCount = parameterInfos.Length;
             int delegateNonParamsArgumentsCount = _delegateContainsParamsArgument ? delegateArgumentsCount - 1 : delegateArgumentsCount;
 
-            int jsArgumentsCount = jsArguments.Length;
+            int jsArgumentsCount = arguments.Length;
             int jsArgumentsWithoutParamsCount = Math.Min(jsArgumentsCount, delegateNonParamsArgumentsCount);
 
-            var parameters = new object[delegateArgumentsCount];
+            var clrTypeConverter = Engine.TypeConverter;
+            var valueCoercionType = Engine.Options.Interop.ValueCoercion;
+            var parameters = new object?[delegateArgumentsCount];
 
             // convert non params parameter to expected types
             for (var i = 0; i < jsArgumentsWithoutParamsCount; i++)
             {
                 var parameterType = parameterInfos[i].ParameterType;
+                var value = arguments[i];
+                object? converted;
 
                 if (parameterType == typeof(JsValue))
                 {
-                    parameters[i] = jsArguments[i];
+                    converted = value;
                 }
-                else
+                else if (!ReflectionExtensions.TryConvertViaTypeCoercion(parameterType, valueCoercionType, value, out converted))
                 {
-                    parameters[i] = Engine.ClrTypeConverter.Convert(
-                        jsArguments[i].ToObject(),
+                    converted = clrTypeConverter.Convert(
+                        value.ToObject(),
                         parameterType,
                         CultureInfo.InvariantCulture);
                 }
+
+                parameters[i] = converted;
             }
 
             // assign null to parameters not provided
@@ -88,42 +98,83 @@ namespace Jint.Runtime.Interop
                 }
             }
 
-            // assign params to array and converts each objet to expected type
+            // assign params to array and converts each object to expected type
             if (_delegateContainsParamsArgument)
             {
                 int paramsArgumentIndex = delegateArgumentsCount - 1;
                 int paramsCount = Math.Max(0, jsArgumentsCount - delegateNonParamsArgumentsCount);
 
-                object[] paramsParameter = new object[paramsCount];
                 var paramsParameterType = parameterInfos[paramsArgumentIndex].ParameterType.GetElementType();
+                var paramsParameter = Array.CreateInstance(paramsParameterType!, paramsCount);
 
                 for (var i = paramsArgumentIndex; i < jsArgumentsCount; i++)
                 {
                     var paramsIndex = i - paramsArgumentIndex;
+                    var value = arguments[i];
+                    object? converted;
 
                     if (paramsParameterType == typeof(JsValue))
                     {
-                        paramsParameter[paramsIndex] = jsArguments[i];
+                        converted = value;
                     }
-                    else
+                    else if (!ReflectionExtensions.TryConvertViaTypeCoercion(paramsParameterType, valueCoercionType, value, out converted))
                     {
-                        paramsParameter[paramsIndex] = Engine.ClrTypeConverter.Convert(
-                            jsArguments[i].ToObject(),
-                            paramsParameterType,
+                        converted = Engine.TypeConverter.Convert(
+                            value.ToObject(),
+                            paramsParameterType!,
                             CultureInfo.InvariantCulture);
                     }
+
+                    paramsParameter.SetValue(converted, paramsIndex);
                 }
+
                 parameters[paramsArgumentIndex] = paramsParameter;
             }
+
             try
             {
-                return FromObject(Engine, _d.DynamicInvoke(parameters));
+                var result = _d.DynamicInvoke(parameters);
+                if (!IsAwaitable(result))
+                {
+                    return FromObject(Engine, result);
+                }
+                return ConvertAwaitableToPromise(Engine, result!);
             }
             catch (TargetInvocationException exception)
             {
-                ExceptionHelper.ThrowMeaningfulException(_engine, exception);
+                ExceptionHelper.ThrowMeaningfulException(Engine, exception);
                 throw;
             }
         }
+
+        private static bool IsAwaitable(object? obj)
+        {
+            if (obj is null)
+            {
+                return false;
+            }
+            if (obj is Task)
+            {
+                return true;
+            }
+#if NETSTANDARD2_1_OR_GREATER || NETCOREAPP
+            if (obj is ValueTask)
+            {
+                return true;
+            }
+
+            // ValueTask<T> is not derived from ValueTask, so we need to check for it explicitly
+            var type = obj.GetType();
+            if (!type.IsGenericType)
+            {
+                return false;
+            }
+
+            return type.GetGenericTypeDefinition() == typeof(ValueTask<>);
+#else
+            return false;
+#endif
+        }
+
     }
 }

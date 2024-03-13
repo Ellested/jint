@@ -1,10 +1,13 @@
-﻿// Licensed to the .NET Foundation under one or more agreements.
+#pragma warning disable MA0006
+#pragma warning disable MA0008
+
+#nullable disable
+
+// Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -12,7 +15,7 @@ using System.Runtime.CompilerServices;
 namespace Jint.Collections
 {
     /// <summary>
-    /// DictionarySlim<string, TValue> is similar to Dictionary<TKey, TValue> but optimized in three ways:
+    /// DictionarySlim&lt;string, TValue> is similar to Dictionary&lt;TKey, TValue> but optimized in three ways:
     /// 1) It allows access to the value by ref replacing the common TryGetValue and Add pattern.
     /// 2) It does not store the hash code (assumes it is cheap to equate values).
     /// 3) It does not accept an equality comparer (assumes Object.GetHashCode() and Object.Equals() or overridden implementation are cheap and sufficient).
@@ -142,7 +145,13 @@ namespace Jint.Collections
             return false;
         }
 
-       // Not safe for concurrent _reads_ (at least, if either of them add)
+        public void SetOrUpdateValue<TState>(Key key, Func<TValue, TState, TValue> updater, TState state)
+        {
+            ref var currentValue = ref GetOrAddValueRef(key);
+            currentValue = updater(currentValue, state);
+        }
+
+        // Not safe for concurrent _reads_ (at least, if either of them add)
         // For concurrent reads, prefer TryGetValue(key, out value)
         /// <summary>
         /// Gets the value for the specified key, or, if the key is not present,
@@ -163,6 +172,32 @@ namespace Jint.Collections
             }
 
             return ref AddKey(key, bucketIndex);
+        }
+
+        public bool TryAdd(Key key, TValue value)
+        {
+            Entry[] entries = _entries;
+            int bucketIndex = key.HashCode & (_buckets.Length - 1);
+            for (int i = _buckets[bucketIndex] - 1;
+                 (uint)i < (uint)entries.Length; i = entries[i].next)
+            {
+                if (key.Name == entries[i].key.Name)
+                {
+                    return false;
+                }
+            }
+
+            AddKey(key, bucketIndex) = value;
+            return true;
+        }
+
+        /// <summary>
+        /// Adds a new item and expects key to not to exist.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void AddDangerous(in Key key, TValue value)
+        {
+            AddKey(key, key.HashCode & (_buckets.Length - 1)) = value;
         }
 
         public ref TValue this[Key key]
@@ -223,7 +258,7 @@ namespace Jint.Collections
 
             return entries;
         }
-        
+
         /// <summary>
         /// Gets an enumerator over the dictionary
         /// </summary>
@@ -287,7 +322,7 @@ namespace Jint.Collections
 
             public void Dispose() { }
         }
-        
+
         internal static class HashHelpers
         {
             internal static readonly int[] SizeOneIntArray = new int[1];

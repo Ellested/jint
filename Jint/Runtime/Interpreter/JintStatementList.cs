@@ -1,145 +1,224 @@
-﻿using System.Collections.Generic;
+﻿using System.Runtime.CompilerServices;
 using Esprima.Ast;
 using Jint.Native;
-using Jint.Runtime.Environments;
+using Jint.Native.Error;
 using Jint.Runtime.Interpreter.Statements;
+using Environment = Jint.Runtime.Environments.Environment;
 
 namespace Jint.Runtime.Interpreter
 {
-    public class JintStatementList
+    internal sealed class JintStatementList
     {
-        private class Pair
-        {
-            internal JintStatement Statement;
-            internal Completion? Value;
-        }
+        private readonly record struct Pair(JintStatement Statement, JsValue? Value);
 
-        private readonly Engine _engine;
-        private readonly Statement _statement;
+        private readonly Statement? _statement;
         private readonly NodeList<Statement> _statements;
 
-        private Pair[] _jintStatements;
+        private Pair[]? _jintStatements;
         private bool _initialized;
+        private uint _index;
+        private readonly bool _generator;
 
-        public JintStatementList(Engine engine, Statement statement, NodeList<Statement> statements)
+        public JintStatementList(IFunction function)
+            : this((BlockStatement) function.Body)
         {
-            _engine = engine;
+            _generator = function.Generator;
+        }
+
+        public JintStatementList(BlockStatement blockStatement)
+            : this(blockStatement, blockStatement.Body)
+        {
+        }
+
+        public JintStatementList(Program program)
+            : this(null, program.Body)
+        {
+        }
+
+        public JintStatementList(Statement? statement, in NodeList<Statement> statements)
+        {
             _statement = statement;
             _statements = statements;
         }
 
-        private void Initialize()
+        private void Initialize(EvaluationContext context)
         {
             var jintStatements = new Pair[_statements.Count];
             for (var i = 0; i < jintStatements.Length; i++)
             {
                 var esprimaStatement = _statements[i];
-                jintStatements[i] = new Pair
-                {
-                    Statement = JintStatement.Build(_engine, esprimaStatement),
-                    Value = JintStatement.FastResolve(esprimaStatement)
-                };
+                var statement = JintStatement.Build(esprimaStatement);
+                // When in debug mode, don't do FastResolve: Stepping requires each statement to be actually executed.
+                var value = context.DebugMode ? null : JintStatement.FastResolve(esprimaStatement);
+                jintStatements[i] = new Pair(statement, value);
             }
+
             _jintStatements = jintStatements;
         }
 
-        public Completion Execute()
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining | (MethodImplOptions) 512)]
+        public Completion Execute(EvaluationContext context)
         {
             if (!_initialized)
             {
-                Initialize();
+                Initialize(context);
                 _initialized = true;
             }
 
-            if (_statement != null)
+            if (_statement is not null)
             {
-                _engine._lastSyntaxNode = _statement;
-                _engine.RunBeforeExecuteStatementChecks(_statement);
+                context.LastSyntaxElement = _statement;
+                context.RunBeforeExecuteStatementChecks(_statement);
             }
 
-            JintStatement s = null;
-            var c = new Completion(CompletionType.Normal, null, null, _engine._lastSyntaxNode?.Location ?? default);
+            Completion c = Completion.Empty();
             Completion sl = c;
-            
+
             // The value of a StatementList is the value of the last value-producing item in the StatementList
-            JsValue lastValue = null;
+            var lastValue = JsEmpty.Instance;
+            var i = _index;
+            var temp = _jintStatements!;
             try
             {
-                foreach (var pair in _jintStatements)
+                for (; i < (uint) temp.Length; i++)
                 {
-                    s = pair.Statement;
-                    c = pair.Value ?? s.Execute();
+                    ref readonly var pair = ref temp[i];
+
+                    if (pair.Value is null)
+                    {
+                        c = pair.Statement.Execute(context);
+                        if (context.Engine._error is not null)
+                        {
+                            c = HandleError(context.Engine, pair.Statement);
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        c = new Completion(CompletionType.Return, pair.Value, pair.Statement._statement);
+                    }
+
+                    if (_generator)
+                    {
+                        if (context.Engine.ExecutionContext.Suspended)
+                        {
+                            _index = i + 1;
+                            c = new Completion(CompletionType.Return, c.Value, pair.Statement._statement);
+                            break;
+                        }
+                    }
+
                     if (c.Type != CompletionType.Normal)
                     {
-                        return new Completion(
-                            c.Type,
-                            c.Value ?? sl.Value,
-                            c.Identifier,
-                            c.Location);
+                        return c.UpdateEmpty(sl.Value);
                     }
+
                     sl = c;
-                    lastValue = c.Value ?? lastValue;
+                    if (!c.Value.IsEmpty)
+                    {
+                        lastValue = c.Value;
+                    }
                 }
             }
-            catch (JavaScriptException v)
+            catch (Exception ex)
             {
-                var location = v.Location == default ? s.Location : v.Location;
-                var completion = new Completion(CompletionType.Throw, v.Error, null, location);
-                return completion;
-            }
-            catch (TypeErrorException e)
-            {
-                var error = _engine.TypeError.Construct(new JsValue[]
+                Reset();
+
+                if (ex is JintException)
                 {
-                    e.Message
-                });
-                return new Completion(CompletionType.Throw, error, null, s.Location);
-            }
-            catch (RangeErrorException e)
-            {
-                var error = _engine.RangeError.Construct(new JsValue[]
+                    c = HandleException(context, ex, temp[i].Statement);
+                }
+                else
                 {
-                    e.Message
-                });
-                c = new Completion(CompletionType.Throw, error, null, s.Location);
+                    throw;
+                }
             }
-            return new Completion(c.Type, lastValue ?? JsValue.Undefined, c.Identifier, c.Location);
+
+            return c.UpdateEmpty(lastValue).UpdateEmpty(JsValue.Undefined);
+        }
+
+        internal static Completion HandleException(EvaluationContext context, Exception exception, JintStatement? s)
+        {
+            return exception switch
+            {
+                JavaScriptException javaScriptException => CreateThrowCompletion(s, javaScriptException),
+                TypeErrorException typeErrorException => CreateThrowCompletion(context.Engine.Realm.Intrinsics.TypeError, typeErrorException, typeErrorException.Node ?? s!._statement),
+                RangeErrorException rangeErrorException => CreateThrowCompletion(context.Engine.Realm.Intrinsics.RangeError, rangeErrorException, s!._statement),
+                _ => throw exception
+            };
+        }
+
+        internal static Completion HandleError(Engine engine, JintStatement? s)
+        {
+            var error = engine._error!;
+            engine._error = null;
+            return CreateThrowCompletion(error.ErrorConstructor, error.Message, engine._lastSyntaxElement ?? s!._statement);
+        }
+
+        private static Completion CreateThrowCompletion(ErrorConstructor errorConstructor, string? message, SyntaxElement s)
+        {
+            var error = errorConstructor.Construct(message);
+            return new Completion(CompletionType.Throw, error, s);
+        }
+
+        private static Completion CreateThrowCompletion(ErrorConstructor errorConstructor, Exception e, SyntaxElement s)
+        {
+            var error = errorConstructor.Construct(e.Message);
+            return new Completion(CompletionType.Throw, error, s);
+        }
+
+        private static Completion CreateThrowCompletion(JintStatement? s, JavaScriptException v)
+        {
+            SyntaxElement source = s!._statement;
+            if (v.Location != default)
+            {
+                source = EsprimaExtensions.CreateLocationNode(v.Location);
+            }
+
+            return new Completion(CompletionType.Throw, v.Error, source);
         }
 
         /// <summary>
         /// https://tc39.es/ecma262/#sec-blockdeclarationinstantiation
         /// </summary>
-        internal static void BlockDeclarationInstantiation(
-            LexicalEnvironment env,
-            List<VariableDeclaration> lexicalDeclarations)
+        internal static void BlockDeclarationInstantiation(Environment env, List<Declaration> declarations)
         {
-            var envRec = env._record;
-            for (var i = 0; i < lexicalDeclarations.Count; i++)
+            var privateEnv = env._engine.ExecutionContext.PrivateEnvironment;
+            var boundNames = new List<Key>();
+            for (var i = 0; i < declarations.Count; i++)
             {
-                var variableDeclaration = lexicalDeclarations[i];
-                ref readonly var nodeList = ref variableDeclaration.Declarations;
-                for (var j = 0; j < nodeList.Count; j++)
+                var d = declarations[i];
+                boundNames.Clear();
+                d.GetBoundNames(boundNames);
+                for (var j = 0; j < boundNames.Count; j++)
                 {
-                    var declaration = nodeList[j];
-                    if (declaration.Id is Identifier identifier)
+                    var dn = boundNames[j];
+                    if (d is VariableDeclaration { Kind: VariableDeclarationKind.Const })
                     {
-                        if (variableDeclaration.Kind == VariableDeclarationKind.Const)
-                        {
-                            envRec.CreateImmutableBinding(identifier.Name, strict: true);
-                        }
-                        else
-                        {
-                            envRec.CreateMutableBinding(identifier.Name, canBeDeleted: false);
-                        }
+                        env.CreateImmutableBinding(dn, strict: true);
                     }
-                    // else if 
-                    /*  If d is a FunctionDeclaration, a GeneratorDeclaration, an AsyncFunctionDeclaration, or an AsyncGeneratorDeclaration, then
-                     * Let fn be the sole element of the BoundNames of d.
-                     * Let fo be the result of performing InstantiateFunctionObject for d with argument env.
-                     * Perform envRec.InitializeBinding(fn, fo).
-                     */
+                    else
+                    {
+                        env.CreateMutableBinding(dn, canBeDeleted: false);
+                    }
+                }
+
+                if (d is FunctionDeclaration functionDeclaration)
+                {
+                    var definition = new JintFunctionDefinition(functionDeclaration);
+                    var fn = definition.Name!;
+                    var fo = env._engine.Realm.Intrinsics.Function.InstantiateFunctionObject(definition, env, privateEnv);
+                    env.InitializeBinding(fn, fo);
                 }
             }
+        }
+
+        public bool Completed => _index == _jintStatements?.Length;
+
+        public void Reset()
+        {
+            _index = 0;
         }
     }
 }

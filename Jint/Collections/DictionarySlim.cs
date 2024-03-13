@@ -1,17 +1,18 @@
-﻿// Licensed to the .NET Foundation under one or more agreements.
+#nullable disable
+
+// Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Jint.Collections
 {
     /// <summary>
-    /// DictionarySlim<string, TValue> is similar to Dictionary<TKey, TValue> but optimized in three ways:
+    /// DictionarySlim&lt;string, TValue> is similar to Dictionary&lt;TKey, TValue> but optimized in three ways:
     /// 1) It allows access to the value by ref replacing the common TryGetValue and Add pattern.
     /// 2) It does not store the hash code (assumes it is cheap to equate values).
     /// 3) It does not accept an equality comparer (assumes Object.GetHashCode() and Object.Equals() or overridden implementation are cheap and sufficient).
@@ -32,6 +33,7 @@ namespace Jint.Collections
         private Entry[] _entries;
 
         [DebuggerDisplay("({key}, {value})->{next}")]
+        [StructLayout(LayoutKind.Auto)]
         private struct Entry
         {
             public TKey key;

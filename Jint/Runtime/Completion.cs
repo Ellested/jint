@@ -1,46 +1,63 @@
-﻿using System.Runtime.CompilerServices;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Esprima;
+using Esprima.Ast;
 using Jint.Native;
 
-namespace Jint.Runtime
+namespace Jint.Runtime;
+
+public enum CompletionType : byte
 {
-    public enum CompletionType
+    Normal = 0,
+    Return = 1,
+    Throw = 2,
+    Break,
+    Continue
+}
+
+/// <summary>
+/// https://tc39.es/ecma262/#sec-completion-record-specification-type
+/// </summary>
+[StructLayout(LayoutKind.Auto)]
+public readonly struct Completion
+{
+    private static readonly Node _emptyNode = new Identifier("");
+    private static readonly Completion _emptyCompletion = new(CompletionType.Normal, JsEmpty.Instance, _emptyNode);
+
+    internal readonly SyntaxElement _source;
+
+    public Completion(CompletionType type, JsValue value, SyntaxElement source)
     {
-        Normal,
-        Break,
-        Continue,
-        Return,
-        Throw
+        Debug.Assert(value is not null);
+
+        Type = type;
+        Value = value!;
+        _source = source;
     }
 
+    public readonly CompletionType Type;
+    public readonly JsValue Value;
+    public ref readonly Location Location => ref _source.Location;
+
+    public static ref readonly Completion Empty() => ref _emptyCompletion;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public JsValue GetValueOrDefault() => Value.IsEmpty ? JsValue.Undefined : Value;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool IsAbrupt() => Type != CompletionType.Normal;
+
     /// <summary>
-    /// http://www.ecma-international.org/ecma-262/5.1/#sec-8.9
+    /// https://tc39.es/ecma262/#sec-updateempty
     /// </summary>
-    public readonly struct Completion
+    internal Completion UpdateEmpty(JsValue value)
     {
-        public Completion(CompletionType type, JsValue value, string identifier, Location location)
+        if (Value?._type != InternalTypes.Empty)
         {
-            Type = type;
-            Value = value;
-            Identifier = identifier;
-            Location = location;
+            return this;
         }
 
-        public readonly CompletionType Type;
-        public readonly JsValue Value;
-        public readonly string Identifier;
-        public readonly Location Location;
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public JsValue GetValueOrDefault()
-        {
-            return Value ?? Undefined.Instance;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsAbrupt()
-        {
-            return Type != CompletionType.Normal;
-        }
+        return new Completion(Type, value, _source);
     }
 }

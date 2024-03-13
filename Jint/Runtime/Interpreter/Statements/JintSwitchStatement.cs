@@ -8,27 +8,26 @@ namespace Jint.Runtime.Interpreter.Statements
     /// </summary>
     internal sealed class JintSwitchStatement : JintStatement<SwitchStatement>
     {
-        private JintSwitchBlock _switchBlock;
-        private JintExpression _discriminant;
+        private JintSwitchBlock _switchBlock = null!;
+        private JintExpression _discriminant = null!;
 
-        public JintSwitchStatement(Engine engine, SwitchStatement statement) : base(engine, statement)
+        public JintSwitchStatement(SwitchStatement statement) : base(statement)
         {
-            _initialized = false;
         }
 
-        protected override void Initialize()
+        protected override void Initialize(EvaluationContext context)
         {
-            _switchBlock = new JintSwitchBlock(_engine, _statement.Cases);
-            _discriminant = JintExpression.Build(_engine, _statement.Discriminant);
+            _switchBlock = new JintSwitchBlock(_statement.Cases);
+            _discriminant = JintExpression.Build(_statement.Discriminant);
         }
 
-        protected override Completion ExecuteInternal()
+        protected override Completion ExecuteInternal(EvaluationContext context)
         {
-            var jsValue = _discriminant.GetValue();
-            var r = _switchBlock.Execute(jsValue);
-            if (r.Type == CompletionType.Break && r.Identifier == _statement.LabelSet?.Name)
+            var value = _discriminant.GetValue(context);
+            var r = _switchBlock.Execute(context, value);
+            if (r.Type == CompletionType.Break && string.Equals(context.Target, _statement.LabelSet?.Name, StringComparison.Ordinal))
             {
-                return new Completion(CompletionType.Normal, r.Value, null, Location);
+                return new Completion(CompletionType.Normal, r.Value, ((JintStatement) this)._statement);
             }
 
             return r;

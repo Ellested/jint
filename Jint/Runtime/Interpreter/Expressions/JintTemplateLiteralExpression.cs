@@ -1,58 +1,58 @@
+using System.Text;
 using Esprima.Ast;
 using Jint.Native;
-using Jint.Pooling;
 
-namespace Jint.Runtime.Interpreter.Expressions
+namespace Jint.Runtime.Interpreter.Expressions;
+
+internal sealed class JintTemplateLiteralExpression : JintExpression
 {
-    internal sealed class JintTemplateLiteralExpression : JintExpression
+    internal readonly TemplateLiteral _templateLiteralExpression;
+    internal JintExpression[] _expressions = Array.Empty<JintExpression>();
+    private bool _initialized;
+
+    public JintTemplateLiteralExpression(TemplateLiteral expression) : base(expression)
     {
-        internal readonly TemplateLiteral _templateLiteralExpression;
-        internal JintExpression[] _expressions;
+        _templateLiteralExpression = expression;
+    }
 
-        public JintTemplateLiteralExpression(Engine engine, TemplateLiteral expression) : base(engine, expression)
+    private void Initialize()
+    {
+        DoInitialize();
+    }
+
+    internal void DoInitialize()
+    {
+        ref readonly var expressions = ref _templateLiteralExpression.Expressions;
+        _expressions = new JintExpression[expressions.Count];
+        for (var i = 0; i < expressions.Count; i++)
         {
-            _templateLiteralExpression = expression;
-            _initialized = false;
+            _expressions[i] = Build(expressions[i]);
         }
 
-        protected override void Initialize()
-        {
-            DoInitialize();
-        }
+        _initialized = true;
+    }
 
-        internal void DoInitialize()
+    protected override object EvaluateInternal(EvaluationContext context)
+    {
+        if (!_initialized)
         {
-            _expressions = new JintExpression[_templateLiteralExpression.Expressions.Count];
-            for (var i = 0; i < _templateLiteralExpression.Expressions.Count; i++)
-            {
-                var exp = _templateLiteralExpression.Expressions[i];
-                _expressions[i] = Build(_engine, exp);
-            }
-
+            Initialize();
             _initialized = true;
         }
 
-        private JsString BuildString()
+        using var sb = new ValueStringBuilder();
+        ref readonly var elements = ref _templateLiteralExpression.Quasis;
+        for (var i = 0; i < elements.Count; i++)
         {
-            using (var sb = StringBuilderPool.Rent())
+            var quasi = elements[i];
+            sb.Append(quasi.Value.Cooked);
+            if (i < _expressions.Length)
             {
-                for (var i = 0; i < _templateLiteralExpression.Quasis.Count; i++)
-                {
-                    var quasi = _templateLiteralExpression.Quasis[i];
-                    sb.Builder.Append(quasi.Value.Cooked);
-                    if (i < _expressions.Length)
-                    {
-                        sb.Builder.Append(_expressions[i].GetValue());
-                    }
-                }
-
-                return JsString.Create(sb.ToString());
+                var value = _expressions[i].GetValue(context);
+                sb.Append(TypeConverter.ToString(value));
             }
         }
 
-        protected override object EvaluateInternal()
-        {
-            return BuildString();
-        }
+        return JsString.Create(sb.ToString());
     }
 }

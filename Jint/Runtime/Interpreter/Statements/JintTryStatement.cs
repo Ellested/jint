@@ -1,62 +1,90 @@
 using Esprima.Ast;
+using Jint.Native;
 using Jint.Runtime.Environments;
 
 namespace Jint.Runtime.Interpreter.Statements
 {
     /// <summary>
-    /// http://www.ecma-international.org/ecma-262/5.1/#sec-12.14
+    /// https://tc39.es/ecma262/#sec-try-statement
     /// </summary>
     internal sealed class JintTryStatement : JintStatement<TryStatement>
     {
-        private readonly JintStatement _block;
-        private readonly JintStatement _catch;
-        private readonly Key _catchParamName;
-        private readonly JintStatement _finalizer;
+        private JintBlockStatement _block = null!;
+        private JintBlockStatement? _catch;
+        private JintBlockStatement? _finalizer;
 
-        public JintTryStatement(Engine engine, TryStatement statement) : base(engine, statement)
+        public JintTryStatement(TryStatement statement) : base(statement)
         {
-            _block = Build(engine, statement.Block);
-            if (_statement.Handler != null)
-            {
-                _catch = Build(engine, _statement.Handler.Body);
-                _catchParamName = ((Identifier) _statement.Handler.Param).Name;
-            }
 
-            if (statement.Finalizer != null)
+        }
+
+        protected override void Initialize(EvaluationContext context)
+        {
+            _block = new JintBlockStatement(_statement.Block);
+            if (_statement.Finalizer != null)
             {
-                _finalizer = Build(engine, _statement.Finalizer);
+                _finalizer = new JintBlockStatement(_statement.Finalizer);
             }
         }
 
-        protected override Completion ExecuteInternal()
+        protected override Completion ExecuteInternal(EvaluationContext context)
         {
-            var b = _block.Execute();
+            var engine = context.Engine;
+
+            var b = _block.Execute(context);
+
             if (b.Type == CompletionType.Throw)
             {
-                // execute catch
-                if (_catch != null)
-                {
-                    var c = b.Value;
-                    var oldEnv = _engine.ExecutionContext.LexicalEnvironment;
-                    var catchEnv = LexicalEnvironment.NewDeclarativeEnvironment(_engine, oldEnv);
-                    var catchEnvRecord = (DeclarativeEnvironmentRecord) catchEnv._record;
-                    catchEnvRecord.CreateMutableBindingAndInitialize(_catchParamName, canBeDeleted: false, c);
-
-                    _engine.UpdateLexicalEnvironment(catchEnv);
-                    b = _catch.Execute();
-                    _engine.UpdateLexicalEnvironment(oldEnv);
-                }
+                b = ExecuteCatch(context, b, engine);
             }
 
             if (_finalizer != null)
             {
-                var f = _finalizer.Execute();
+                var f = _finalizer.Execute(context);
                 if (f.Type == CompletionType.Normal)
                 {
                     return b;
                 }
 
-                return f;
+                return f.UpdateEmpty(JsValue.Undefined);
+            }
+
+            return b.UpdateEmpty(JsValue.Undefined);
+        }
+
+        private Completion ExecuteCatch(EvaluationContext context, Completion b, Engine engine)
+        {
+            // execute catch
+            if (_statement.Handler is not null)
+            {
+                // initialize lazily
+                if (_catch is null)
+                {
+                    _catch = new JintBlockStatement(_statement.Handler.Body);
+                }
+
+                // https://tc39.es/ecma262/#sec-runtime-semantics-catchclauseevaluation
+
+                var thrownValue = b.Value;
+                var oldEnv = engine.ExecutionContext.LexicalEnvironment;
+                var catchEnv = JintEnvironment.NewDeclarativeEnvironment(engine, oldEnv, catchEnvironment: true);
+
+                var boundNames = new List<Key>();
+                _statement.Handler.Param.GetBoundNames(boundNames);
+
+                for (var i = 0; i < boundNames.Count; i++)
+                {
+                    catchEnv.CreateMutableBinding(boundNames[i]);
+                }
+
+                engine.UpdateLexicalEnvironment(catchEnv);
+
+                var catchParam = _statement.Handler?.Param;
+                catchParam.BindingInitialization(context, thrownValue, catchEnv);
+
+                b = _catch.Execute(context);
+
+                engine.UpdateLexicalEnvironment(oldEnv);
             }
 
             return b;

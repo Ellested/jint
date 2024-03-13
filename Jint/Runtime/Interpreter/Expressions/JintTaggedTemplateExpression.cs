@@ -1,71 +1,101 @@
 using Esprima.Ast;
 using Jint.Native;
-using Jint.Native.Array;
+using Jint.Native.Object;
 using Jint.Runtime.Descriptors;
 
-namespace Jint.Runtime.Interpreter.Expressions
+namespace Jint.Runtime.Interpreter.Expressions;
+
+internal sealed class JintTaggedTemplateExpression : JintExpression
 {
-    internal sealed class JintTaggedTemplateExpression : JintExpression
+    internal static readonly JsString PropertyRaw = new JsString("raw");
+
+    private JintExpression _tagIdentifier = null!;
+    private JintTemplateLiteralExpression _quasi = null!;
+    private bool _initialized;
+
+    public JintTaggedTemplateExpression(TaggedTemplateExpression expression) : base(expression)
     {
-        internal static  readonly JsString PropertyRaw = new JsString("raw");
-        
-        private readonly TaggedTemplateExpression _taggedTemplateExpression;
-        private JintExpression _tagIdentifier;
-        private JintTemplateLiteralExpression _quasi;
+    }
 
-        public JintTaggedTemplateExpression(Engine engine, TaggedTemplateExpression expression) : base(engine, expression)
+    private void Initialize()
+    {
+        var taggedTemplateExpression = (TaggedTemplateExpression) _expression;
+        _tagIdentifier = Build(taggedTemplateExpression.Tag);
+        _quasi = new JintTemplateLiteralExpression(taggedTemplateExpression.Quasi);
+        _quasi.DoInitialize();
+    }
+
+    protected override object EvaluateInternal(EvaluationContext context)
+    {
+        if (!_initialized)
         {
-            _taggedTemplateExpression = expression;
-            _initialized = false;
+            Initialize();
+            _initialized = true;
         }
 
-        protected override void Initialize()
+        var engine = context.Engine;
+
+        var identifier = _tagIdentifier.Evaluate(context);
+        var tagger = engine.GetValue(identifier) as ICallable;
+        if (tagger is null)
         {
-            _tagIdentifier = Build(_engine, _taggedTemplateExpression.Tag);
-            _quasi = (JintTemplateLiteralExpression) Build(_engine, _taggedTemplateExpression.Quasi);
-            _quasi.DoInitialize();
+            ExceptionHelper.ThrowTypeError(engine.Realm, "Argument must be callable");
         }
 
-        protected override object EvaluateInternal()
+        ref readonly var expressions = ref _quasi._expressions;
+
+        var args = engine._jsValueArrayPool.RentArray(expressions.Length + 1);
+
+        var template = GetTemplateObject(context);
+        args[0] = template;
+
+        for (var i = 0; i < expressions.Length; ++i)
         {
-            var tagger = _engine.GetValue(_tagIdentifier.GetValue()) as ICallable
-                         ?? ExceptionHelper.ThrowTypeError<ICallable>(_engine, "Argument must be callable");
-
-            var expressions = _quasi._expressions;
-
-            var args = _engine._jsValueArrayPool.RentArray((expressions.Length + 1));
-
-            var template = GetTemplateObject();
-            args[0] = template;
-
-            for (int i = 0; i < expressions.Length; ++i)
-            {
-                args[i + 1] = expressions[i].GetValue();
-            }
-
-            var result = tagger.Call(JsValue.Undefined, args);
-            _engine._jsValueArrayPool.ReturnArray(args);
-
-            return result;
+            args[i + 1] = expressions[i].GetValue(context);
         }
 
-        /// <summary>
-        /// https://www.ecma-international.org/ecma-262/6.0/#sec-gettemplateobject
-        /// </summary>
-        private ArrayInstance GetTemplateObject()
-        {
-            var count = (uint) _quasi._templateLiteralExpression.Quasis.Count;
-            var template = _engine.Array.ConstructFast(count);
-            var rawObj = _engine.Array.ConstructFast(count);
-            for (uint i = 0; i < _quasi._templateLiteralExpression.Quasis.Count; ++i)
-            {
-                var templateElementValue = _quasi._templateLiteralExpression.Quasis[(int) i].Value;
-                template.SetIndexValue(i, templateElementValue.Cooked, updateLength: false);
-                rawObj.SetIndexValue(i, templateElementValue.Raw, updateLength: false);
-            }
+        var thisObject = identifier is Reference reference && reference.IsPropertyReference
+            ? reference.Base
+            : JsValue.Undefined;
 
-            template.DefineOwnProperty(PropertyRaw, new PropertyDescriptor(rawObj, PropertyFlag.AllForbidden));
-            return template;
+        var result = tagger.Call(thisObject, args);
+
+        engine._jsValueArrayPool.ReturnArray(args);
+
+        return result;
+    }
+
+    /// <summary>
+    /// https://www.ecma-international.org/ecma-262/6.0/#sec-gettemplateobject
+    /// </summary>
+    private JsArray GetTemplateObject(EvaluationContext context)
+    {
+        var realm = context.Engine.Realm;
+        var templateRegistry = realm._templateMap;
+        if (templateRegistry.TryGetValue(this._expression, out var cached))
+        {
+            return cached;
         }
+
+        ref readonly var elements = ref _quasi._templateLiteralExpression.Quasis;
+        var count = (uint) elements.Count;
+
+        var template = new JsArray(context.Engine, count, length: count);
+        var rawObj = new JsArray(context.Engine, count, length: count);
+        for (uint i = 0; i < elements.Count; ++i)
+        {
+            var templateElementValue = elements[(int) i].Value;
+            template.SetIndexValue(i, templateElementValue.Cooked, updateLength: false);
+            rawObj.SetIndexValue(i, templateElementValue.Raw, updateLength: false);
+        }
+
+        rawObj.SetIntegrityLevel(ObjectInstance.IntegrityLevel.Frozen);
+        template.DefineOwnProperty(PropertyRaw, new PropertyDescriptor(rawObj, PropertyFlag.OnlyWritable));
+
+        template.SetIntegrityLevel(ObjectInstance.IntegrityLevel.Frozen);
+
+        realm._templateMap[_expression] = template;
+
+        return template;
     }
 }

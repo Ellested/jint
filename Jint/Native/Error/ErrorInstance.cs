@@ -1,32 +1,29 @@
-﻿using Jint.Native.Object;
+using Jint.Native.Object;
 using Jint.Runtime;
-using Jint.Runtime.Descriptors;
 
-namespace Jint.Native.Error
+namespace Jint.Native.Error;
+
+public class ErrorInstance : ObjectInstance
 {
-    public class ErrorInstance : ObjectInstance
+    private protected ErrorInstance(Engine engine, ObjectClass objectClass)
+        : base(engine, objectClass)
     {
-        private readonly JsString _name;
-        private PropertyDescriptor _descriptor;
+    }
 
-        public ErrorInstance(Engine engine, JsString name)
-            : base(engine, ObjectClass.Error)
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-installerrorcause
+    /// </summary>
+    internal void InstallErrorCause(JsValue options)
+    {
+        if (options is ObjectInstance oi && oi.HasProperty("cause"))
         {
-            _name = name;
+            var cause = oi.Get("cause");
+            CreateNonEnumerableDataPropertyOrThrow("cause", cause);
         }
+    }
 
-        public override PropertyDescriptor GetOwnProperty(JsValue property)
-        {
-            if (property == CommonProperties.Name)
-            {
-                return _descriptor ??= new PropertyDescriptor(_name, PropertyFlag.Configurable | PropertyFlag.Writable);
-            };
-            return base.GetOwnProperty(property);
-        }
-
-        public override string ToString()
-        {
-            return Engine.Error.PrototypeObject.ToString(this, Arguments.Empty).ToObject().ToString();
-        }
+    public override string ToString()
+    {
+        return Engine.Realm.Intrinsics.Error.PrototypeObject.ToString(this, Arguments.Empty).ToObject()?.ToString() ?? "";
     }
 }

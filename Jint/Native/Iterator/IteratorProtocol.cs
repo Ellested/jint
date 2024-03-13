@@ -1,4 +1,3 @@
-﻿using Jint.Native.Array;
 using Jint.Native.Object;
 using Jint.Runtime;
 
@@ -9,13 +8,13 @@ namespace Jint.Native.Iterator
     /// </summary>
     internal abstract class IteratorProtocol
     {
-        protected readonly Engine _engine;
-        private readonly IIterator _iterator;
+        private readonly Engine _engine;
+        private readonly IteratorInstance _iterator;
         private readonly int _argCount;
 
         protected IteratorProtocol(
             Engine engine,
-            IIterator iterator,
+            IteratorInstance iterator,
             int argCount)
         {
             _engine = engine;
@@ -29,7 +28,7 @@ namespace Jint.Native.Iterator
             var done = false;
             try
             {
-                do
+                while (ShouldContinue)
                 {
                     if (!_iterator.TryIteratorStep(out var item))
                     {
@@ -40,7 +39,7 @@ namespace Jint.Native.Iterator
                     var currentValue = item.Get(CommonProperties.Value);
 
                     ProcessItem(args, currentValue);
-                } while (ShouldContinue);
+                }
             }
             catch
             {
@@ -67,31 +66,14 @@ namespace Jint.Native.Iterator
         {
         }
 
-        protected abstract void ProcessItem(JsValue[] args, JsValue currentValue);
+        protected abstract void ProcessItem(JsValue[] arguments, JsValue currentValue);
 
-        protected static JsValue ExtractValueFromIteratorInstance(JsValue jsValue)
+        internal static void AddEntriesFromIterable(ObjectInstance target, IteratorInstance iterable, object adder)
         {
-            if (jsValue is ArrayInstance ai)
+            var callable = adder as ICallable;
+            if (callable is null)
             {
-                uint index = 0;
-                if (ai.GetLength() > 1)
-                {
-                    index = 1;
-                }
-
-                ai.TryGetValue(index, out var value);
-                return value;
-            }
-
-            return jsValue;
-        }
-
-        internal static void AddEntriesFromIterable(ObjectInstance target, IIterator iterable, object adder)
-        {
-            if (!(adder is ICallable callable))
-            {
-                ExceptionHelper.ThrowTypeError(target.Engine, "adder must be callable");
-                return;
+                ExceptionHelper.ThrowTypeError(target.Engine.Realm, "adder must be callable");
             }
 
             var args = target.Engine._jsValueArrayPool.RentArray(2);
@@ -109,10 +91,10 @@ namespace Jint.Native.Iterator
                     var temp = nextItem.Get(CommonProperties.Value);
 
                     skipClose = false;
-                    if (!(temp is ObjectInstance oi))
+                    var oi = temp as ObjectInstance;
+                    if (oi is null)
                     {
-                        ExceptionHelper.ThrowTypeError(target.Engine, "iterator's value must be an object");
-                        return;
+                        ExceptionHelper.ThrowTypeError(target.Engine.Realm, "iterator's value must be an object");
                     }
 
                     var k = oi.Get(JsString.NumberZeroString);

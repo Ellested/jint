@@ -1,27 +1,24 @@
-﻿using System;
-using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.Contracts;
+using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Threading;
-using Jint.Native.Array;
-using Jint.Native.Date;
+using Jint.Native.Generator;
 using Jint.Native.Iterator;
 using Jint.Native.Number;
 using Jint.Native.Object;
-using Jint.Native.RegExp;
 using Jint.Native.Symbol;
 using Jint.Runtime;
-using Jint.Runtime.Descriptors;
 using Jint.Runtime.Interop;
 
 namespace Jint.Native
 {
-    [DebuggerTypeProxy(typeof(JsValueDebugView))]
-    public abstract class JsValue : IEquatable<JsValue>
+    public abstract partial class JsValue : IEquatable<JsValue>
     {
         public static readonly JsValue Undefined = new JsUndefined();
         public static readonly JsValue Null = new JsNull();
+
+        [DebuggerBrowsable(DebuggerBrowsableState.Never)]
         internal readonly InternalTypes _type;
 
         protected JsValue(Types type)
@@ -35,232 +32,165 @@ namespace Jint.Native
         }
 
         [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsPrimitive()
-        {
-            return (_type & (InternalTypes.Primitive | InternalTypes.Undefined | InternalTypes.Null)) != 0;
-        }
+        internal virtual bool IsArray() => false;
+
+        [DebuggerBrowsable(DebuggerBrowsableState.Never)]
+        internal virtual bool IsIntegerIndexedArray => false;
+
+        [DebuggerBrowsable(DebuggerBrowsableState.Never)]
+        internal virtual bool IsConstructor => false;
+
+        internal bool IsEmpty => ReferenceEquals(this, JsEmpty.Instance);
 
         [Pure]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsUndefined()
+        internal IteratorInstance GetIterator(Realm realm, GeneratorKind hint = GeneratorKind.Sync, ICallable? method = null)
         {
-            return _type == InternalTypes.Undefined;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal bool IsNullOrUndefined()
-        {
-            return _type < InternalTypes.Boolean;
-        }
-
-        [Pure]
-        public virtual bool IsArray()
-        {
-            return this is ArrayInstance;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsDate()
-        {
-            return this is DateInstance;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsRegExp()
-        {
-            if (!(this is ObjectInstance oi))
+            if (!TryGetIterator(realm, out var iterator, hint, method))
             {
-                return false;
-            }
-            
-            var matcher = oi.Get(GlobalSymbolRegistry.Match);
-            if (!matcher.IsUndefined())
-            {
-                return TypeConverter.ToBoolean(matcher);
-            }
-
-            return this is RegExpInstance;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsObject()
-        {
-            return (_type & InternalTypes.Object) != 0;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsString()
-        {
-            return (_type & InternalTypes.String) != 0;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsNumber()
-        {
-            return (_type & (InternalTypes.Number | InternalTypes.Integer)) != 0;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal bool IsInteger()
-        {
-            return _type == InternalTypes.Integer;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsBoolean()
-        {
-            return _type == InternalTypes.Boolean;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsNull()
-        {
-            return _type == InternalTypes.Null;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsSymbol()
-        {
-            return _type == InternalTypes.Symbol;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public ObjectInstance AsObject()
-        {
-            if (!IsObject())
-            {
-                ExceptionHelper.ThrowArgumentException("The value is not an object");
-            }
-            return this as ObjectInstance;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public TInstance AsInstance<TInstance>() where TInstance : class
-        {
-            if (!IsObject())
-            {
-                ExceptionHelper.ThrowArgumentException("The value is not an object");
-            }
-            return this as TInstance;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public ArrayInstance AsArray()
-        {
-            if (!IsArray())
-            {
-                ExceptionHelper.ThrowArgumentException("The value is not an array");
-            }
-            return this as ArrayInstance;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal IIterator GetIterator(Engine engine)
-        {
-            if (!TryGetIterator(engine, out var iterator))
-            {
-                return ExceptionHelper.ThrowTypeError<IIterator>(engine, "The value is not iterable");
+                ExceptionHelper.ThrowTypeError(realm, "The value is not iterable");
+                return null!;
             }
 
             return iterator;
         }
 
         [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal bool TryGetIterator(Engine engine, out IIterator iterator)
+        internal IteratorInstance GetIteratorFromMethod(Realm realm, ICallable method)
         {
-            var objectInstance = TypeConverter.ToObject(engine, this);
+            var iterator = method.Call(this);
+            if (iterator is not ObjectInstance objectInstance)
+            {
+                ExceptionHelper.ThrowTypeError(realm);
+                return null!;
+            }
+            return new IteratorInstance.ObjectIterator(objectInstance);
+        }
 
-            if (!objectInstance.TryGetValue(GlobalSymbolRegistry.Iterator, out var value)
-                || !(value is ICallable callable))
+        [Pure]
+        internal virtual bool TryGetIterator(
+            Realm realm,
+            [NotNullWhen(true)] out IteratorInstance? iterator,
+            GeneratorKind hint = GeneratorKind.Sync,
+            ICallable? method = null)
+        {
+            var obj = TypeConverter.ToObject(realm, this);
+
+            if (method is null)
+            {
+                if (hint == GeneratorKind.Async)
+                {
+                    method = obj.GetMethod(GlobalSymbolRegistry.AsyncIterator);
+                    if (method is null)
+                    {
+                        var syncMethod = obj.GetMethod(GlobalSymbolRegistry.Iterator);
+                        var syncIteratorRecord = obj.GetIterator(realm, GeneratorKind.Sync, syncMethod);
+                        // TODO async CreateAsyncFromSyncIterator(syncIteratorRecord);
+                        ExceptionHelper.ThrowNotImplementedException("async");
+                    }
+                }
+                else
+                {
+                    method = obj.GetMethod(GlobalSymbolRegistry.Iterator);
+                }
+            }
+
+            if (method is null)
             {
                 iterator = null;
                 return false;
             }
 
-            var obj = callable.Call(this, Arguments.Empty) as ObjectInstance
-                      ?? ExceptionHelper.ThrowTypeError<ObjectInstance>(engine, "Result of the Symbol.iterator method is not an object");
+            var iteratorResult = method.Call(obj, Arguments.Empty) as ObjectInstance;
+            if (iteratorResult is null)
+            {
+                ExceptionHelper.ThrowTypeError(realm, "Result of the Symbol.iterator method is not an object");
+            }
 
-            if (obj is IIterator i)
+            if (iteratorResult is IteratorInstance i)
             {
                 iterator = i;
             }
             else
             {
-                iterator = new IteratorInstance.ObjectIterator(obj);
+                iterator = new IteratorInstance.ObjectIterator(iteratorResult);
             }
+
             return true;
         }
 
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public DateInstance AsDate()
+        internal static JsValue ConvertAwaitableToPromise(Engine engine, object obj)
         {
-            if (!IsDate())
+            if (obj is Task task)
             {
-                ExceptionHelper.ThrowArgumentException("The value is not a date");
-            }
-            return this as DateInstance;
-        }
-
-        [Pure]
-        public RegExpInstance AsRegExp()
-        {
-            if (!IsRegExp())
-            {
-                ExceptionHelper.ThrowArgumentException("The value is not a regex");
+                return ConvertTaskToPromise(engine, task);
             }
 
-            return this as RegExpInstance;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public T TryCast<T>() where T : class
-        {
-            return this as T;
-        }
-
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public T TryCast<T>(Action<JsValue> fail) where T : class
-        {
-            if (this is T o)
+#if NETSTANDARD2_1_OR_GREATER || NETCOREAPP
+            if (obj is ValueTask valueTask)
             {
-                return o;
+                return ConvertTaskToPromise(engine, valueTask.AsTask());
             }
 
-            fail.Invoke(this);
-
-            return null;
-        }
-        
-        [Pure]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public T As<T>() where T : ObjectInstance
-        {
-            if (IsObject())
+            // ValueTask<T>
+            var asTask = obj.GetType().GetMethod(nameof(ValueTask<object>.AsTask));
+            if (asTask is not null)
             {
-                return this as T;
+                return ConvertTaskToPromise(engine, (Task) asTask.Invoke(obj, parameters: null)!);
             }
-            return null;
+#endif
+
+            return FromObject(engine, JsValue.Undefined);
         }
 
+        internal static JsValue ConvertTaskToPromise(Engine engine, Task task)
+        {
+            var (promise, resolve, reject) = engine.RegisterPromise();
+            task = task.ContinueWith(continuationAction =>
+            {
+                if (continuationAction.IsFaulted)
+                {
+                    reject(FromObject(engine, continuationAction.Exception));
+                }
+                else if (continuationAction.IsCanceled)
+                {
+                    reject(FromObject(engine, new ExecutionCanceledException()));
+                }
+                else
+                {
+                    // Special case: Marshal `async Task` as undefined, as this is `Task<VoidTaskResult>` at runtime
+                    // See https://github.com/sebastienros/jint/pull/1567#issuecomment-1681987702
+                    if (Task.CompletedTask.Equals(continuationAction))
+                    {
+                        resolve(FromObject(engine, JsValue.Undefined));
+                        return;
+                    }
+
+                    var result = continuationAction.GetType().GetProperty(nameof(Task<object>.Result));
+                    if (result is not null)
+                    {
+                        resolve(FromObject(engine, result.GetValue(continuationAction)));
+                    }
+                    else
+                    {
+                        resolve(FromObject(engine, JsValue.Undefined));
+                    }
+                }
+            });
+
+            engine.AddToEventLoop(() =>
+            {
+                if (!task.IsCompleted)
+                {
+                    // Task.Wait has the potential of inlining the task's execution on the current thread; avoid this.
+                    ((IAsyncResult) task).AsyncWaitHandle.WaitOne();
+                }
+            });
+
+            return promise;
+        }
+
+        [DebuggerBrowsable(DebuggerBrowsableState.Never)]
         public Types Type
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -269,17 +199,20 @@ namespace Jint.Native
                 : (Types) (_type & ~InternalTypes.InternalFlags);
         }
 
-        internal virtual bool IsConstructor => this is IConstructor;
-
         /// <summary>
         /// Creates a valid <see cref="JsValue"/> instance from any <see cref="Object"/> instance
         /// </summary>
-        /// <param name="engine"></param>
-        /// <param name="value"></param>
-        /// <returns></returns>
-        public static JsValue FromObject(Engine engine, object value)
+        public static JsValue FromObject(Engine engine, object? value)
         {
-            if (value == null)
+            return FromObjectWithType(engine, value, null);
+        }
+
+        /// <summary>
+        /// Creates a valid <see cref="JsValue"/> instance from any <see cref="Object"/> instance, with a type
+        /// </summary>
+        public static JsValue FromObjectWithType(Engine engine, object? value, Type? type)
+        {
+            if (value is null)
             {
                 return Null;
             }
@@ -289,132 +222,45 @@ namespace Jint.Native
                 return jsValue;
             }
 
-            var converters = engine.Options._ObjectConverters;
-            var convertersCount = converters.Count;
-            for (var i = 0; i < convertersCount; i++)
+            if (engine._objectConverters != null)
             {
-                var converter = converters[i];
-                if (converter.TryConvert(engine, value, out var result))
+                foreach (var converter in engine._objectConverters)
                 {
-                    return result;
+                    if (converter.TryConvert(engine, value, out var result))
+                    {
+                        return result;
+                    }
                 }
             }
 
-            var valueType = value.GetType();
-
-            var typeMappers = Engine.TypeMappers;
-
-            if (typeMappers.TryGetValue(valueType, out var typeMapper))
+            if (DefaultObjectConverter.TryConvert(engine, value, type, out var defaultConversion))
             {
-                return typeMapper(engine, value);
+                return defaultConversion;
             }
 
-            var type = value as Type;
-            if (type != null)
-            {
-                var typeReference = TypeReference.CreateTypeReference(engine, type);
-                return typeReference;
-            }
-
-            if (value is System.Array a)
-            {
-                // racy, we don't care, worst case we'll catch up later
-                Interlocked.CompareExchange(ref Engine.TypeMappers, new Dictionary<Type, Func<Engine, object, JsValue>>(typeMappers)
-                {
-                    [valueType] = Convert
-                }, typeMappers);
-
-                return Convert(engine, a);
-            }
-
-            if (value is Delegate d)
-            {
-                return new DelegateWrapper(engine, d);
-            }
-
-            Type t = value.GetType();
-            if (t.IsEnum)
-            {
-                Type ut = Enum.GetUnderlyingType(t);
-
-                if (ut == typeof(ulong))
-                    return JsNumber.Create(System.Convert.ToDouble(value));
-
-                if (ut == typeof(uint) || ut == typeof(long))
-                    return JsNumber.Create(System.Convert.ToInt64(value));
-
-                return JsNumber.Create(System.Convert.ToInt32(value));
-            }
-
-            // if no known type could be guessed, wrap it as an ObjectInstance
-            var h = engine.Options._WrapObjectHandler;
-            var o = h?.Invoke(engine, value) ?? new ObjectWrapper(engine, value);
-            return o;
-        }
-
-        private static JsValue Convert(Engine e, object v)
-        {
-            var array = (System.Array) v;
-            var arrayLength = (uint) array.Length;
-
-            var jsArray = new ArrayInstance(e, arrayLength);
-            jsArray._prototype = e.Array.PrototypeObject;
-
-            for (uint i = 0; i < arrayLength; ++i)
-            {
-                var jsItem = FromObject(e, array.GetValue(i));
-                jsArray.WriteArrayValue(i, new PropertyDescriptor(jsItem, PropertyFlag.ConfigurableEnumerableWritable));
-            }
-
-            jsArray.SetOwnProperty(CommonProperties.Length, new PropertyDescriptor(arrayLength, PropertyFlag.OnlyWritable));
-
-            return jsArray;
+            return null!;
         }
 
         /// <summary>
         /// Converts a <see cref="JsValue"/> to its underlying CLR value.
         /// </summary>
         /// <returns>The underlying CLR value of the <see cref="JsValue"/> instance.</returns>
-        public abstract object ToObject();
+        public abstract object? ToObject();
 
         /// <summary>
-        /// Invoke the current value as function.
+        /// Coerces boolean value from <see cref="JsValue"/> instance.
         /// </summary>
-        /// <param name="arguments">The arguments of the function call.</param>
-        /// <returns>The value returned by the function call.</returns>
-        public JsValue Invoke(params JsValue[] arguments)
-        {
-            return Invoke(Undefined, arguments);
-        }
+        internal virtual bool ToBoolean() => _type > InternalTypes.Null;
 
         /// <summary>
-        /// Invoke the current value as function.
+        /// https://tc39.es/ecma262/#sec-getv
         /// </summary>
-        /// <param name="thisObj">The this value inside the function call.</param>
-        /// <param name="arguments">The arguments of the function call.</param>
-        /// <returns>The value returned by the function call.</returns>
-        internal JsValue Invoke(JsValue thisObj, JsValue[] arguments)
+        internal JsValue GetV(Realm realm, JsValue property)
         {
-            var callable = this as ICallable ?? ExceptionHelper.ThrowArgumentException<ICallable>("Can only invoke functions");
-            return callable.Call(thisObj, arguments);
-        }
-        
-        /// <summary>
-        /// Invoke the given property as function.
-        /// </summary>
-        /// <param name="v">Serves as both the lookup point for the property and the this value of the call</param>
-        /// <param name="propertyName">Property that should be ICallable</param>
-        /// <param name="arguments">The arguments of the function call.</param>
-        /// <returns>The value returned by the function call.</returns>
-        internal static JsValue Invoke(JsValue v, JsValue propertyName, JsValue[] arguments)
-        {
-            var func = v.Get(propertyName);
-            var callable = func as ICallable ?? ExceptionHelper.ThrowTypeErrorNoEngine<ICallable>("Can only invoke functions");
-            return callable.Call(v, arguments);
+            var o = TypeConverter.ToObject(realm, this);
+            return o.Get(property, this);
         }
 
-        public virtual bool HasOwnProperty(JsValue property) => false;
-        
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public JsValue Get(JsValue property)
         {
@@ -422,7 +268,7 @@ namespace Jint.Native
         }
 
         /// <summary>
-        /// http://www.ecma-international.org/ecma-262/5.1/#sec-8.12.3
+        /// https://tc39.es/ecma262/#sec-get-o-p
         /// </summary>
         public virtual JsValue Get(JsValue property, JsValue receiver)
         {
@@ -430,11 +276,37 @@ namespace Jint.Native
         }
 
         /// <summary>
-        /// https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-set-p-v-receiver
+        /// https://tc39.es/ecma262/#sec-set-o-p-v-throw
         /// </summary>
         public virtual bool Set(JsValue property, JsValue value, JsValue receiver)
         {
-            return ExceptionHelper.ThrowNotSupportedException<bool>();
+            ExceptionHelper.ThrowNotSupportedException();
+            return false;
+        }
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-instanceofoperator
+        /// </summary>
+        internal bool InstanceofOperator(JsValue target)
+        {
+            if (target is not ObjectInstance oi)
+            {
+                ExceptionHelper.ThrowTypeErrorNoEngine("Right-hand side of 'instanceof' is not an object");
+                return false;
+            }
+
+            var instOfHandler = oi.GetMethod(GlobalSymbolRegistry.HasInstance);
+            if (instOfHandler is not null)
+            {
+                return TypeConverter.ToBoolean(instOfHandler.Call(target, new[] { this }));
+            }
+
+            if (!target.IsCallable)
+            {
+                ExceptionHelper.ThrowTypeErrorNoEngine("Right-hand side of 'instanceof' is not callable");
+            }
+
+            return target.OrdinaryHasInstance(this);
         }
 
         public override string ToString()
@@ -442,34 +314,19 @@ namespace Jint.Native
             return "None";
         }
 
-        public static bool operator ==(JsValue a, JsValue b)
+        public static bool operator ==(JsValue? a, JsValue? b)
         {
-            if ((object) a == null)
+            if (a is null)
             {
-                return (object) b == null;
+                return b is null;
             }
 
-            return (object) b != null && a.Equals(b);
+            return b is not null && a.Equals(b);
         }
 
-        public static bool operator !=(JsValue a, JsValue b)
+        public static bool operator !=(JsValue? a, JsValue? b)
         {
-            if ((object)a == null)
-            {
-                if ((object)b == null)
-                {
-                    return false;
-                }
-
-                return true;
-            }
-
-            if ((object)b == null)
-            {
-                return true;
-            }
-
-            return !a.Equals(b);
+            return !(a == b);
         }
 
         public static implicit operator JsValue(char value)
@@ -502,83 +359,81 @@ namespace Jint.Native
             return JsNumber.Create(value);
         }
 
+        public static implicit operator JsValue(BigInteger value)
+        {
+            return JsBigInt.Create(value);
+        }
+
         public static implicit operator JsValue(bool value)
         {
             return value ? JsBoolean.True : JsBoolean.False;
         }
 
         [DebuggerStepThrough]
-        public static implicit operator JsValue(string value)
+        public static implicit operator JsValue(string? value)
         {
-            if (value == null)
-            {
-                return Null;
-            }
-
-            return JsString.Create(value);
+            return value == null ? Null : JsString.Create(value);
         }
 
-        public override bool Equals(object obj)
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-islooselyequal
+        /// </summary>
+        protected internal virtual bool IsLooselyEqual(JsValue value)
         {
-            if (ReferenceEquals(null, obj))
-            {
-                return false;
-            }
-
-            if (ReferenceEquals(this, obj))
+            if (ReferenceEquals(this, value))
             {
                 return true;
             }
 
-            return obj is JsValue value && Equals(value);
-        }
+            // TODO move to type specific IsLooselyEqual
 
-        public abstract bool Equals(JsValue other);
+            var x = this;
+            var y = value;
 
-        public override int GetHashCode()
-        {
-            return _type.GetHashCode();
-        }
-
-        internal class JsValueDebugView
-        {
-            public string Value;
-
-            public JsValueDebugView(JsValue value)
+            if (x.IsNumber() && y.IsString())
             {
-                switch (value.Type)
-                {
-                    case Types.None:
-                        Value = "None";
-                        break;
-                    case Types.Undefined:
-                        Value = "undefined";
-                        break;
-                    case Types.Null:
-                        Value = "null";
-                        break;
-                    case Types.Boolean:
-                        Value = ((JsBoolean) value)._value + " (bool)";
-                        break;
-                    case Types.String:
-                        Value = value.ToString() + " (string)";
-                        break;
-                    case Types.Number:
-                        Value = ((JsNumber) value)._value + " (number)";
-                        break;
-                    case Types.Object:
-                        Value = value.AsObject().GetType().Name;
-                        break;
-                    case Types.Symbol:
-                        var jsValue = ((JsSymbol) value)._value;
-                        Value = (jsValue.IsUndefined() ? "" : jsValue.ToString()) + " (symbol)";
-                        break;
-                    default:
-                        Value = "Unknown";
-                        break;
-                }
+                return x.IsLooselyEqual(TypeConverter.ToNumber(y));
             }
+
+            if (x.IsString() && y.IsNumber())
+            {
+                return y.IsLooselyEqual(TypeConverter.ToNumber(x));
+            }
+
+            if (x.IsBoolean())
+            {
+                return y.IsLooselyEqual(TypeConverter.ToNumber(x));
+            }
+
+            if (y.IsBoolean())
+            {
+                return x.IsLooselyEqual(TypeConverter.ToNumber(y));
+            }
+
+            if (y.IsObject() && (x._type & InternalTypes.Primitive) != InternalTypes.Empty)
+            {
+                return x.IsLooselyEqual(TypeConverter.ToPrimitive(y));
+            }
+
+            if (x.IsObject() && (y._type & InternalTypes.Primitive) != InternalTypes.Empty)
+            {
+                return y.IsLooselyEqual(TypeConverter.ToPrimitive(x));
+            }
+
+            return false;
         }
+
+        /// <summary>
+        /// Strict equality.
+        /// </summary>
+        public override bool Equals(object? obj) => Equals(obj as JsValue);
+
+        /// <summary>
+        /// Strict equality.
+        /// </summary>
+        public virtual bool Equals(JsValue? other) => ReferenceEquals(this, other);
+
+        public override int GetHashCode() => _type.GetHashCode();
 
         /// <summary>
         /// Some values need to be cloned in order to be assigned, like ConcatenatedString.
@@ -587,20 +442,61 @@ namespace Jint.Native
         internal JsValue Clone()
         {
             // concatenated string and arguments currently may require cloning
-            return (_type & InternalTypes.RequiresCloning) == 0
+            return (_type & InternalTypes.RequiresCloning) == InternalTypes.Empty
                 ? this
                 : DoClone();
         }
 
-        internal virtual JsValue DoClone()
-        {
-            return this;
-        }
-        
+        internal virtual JsValue DoClone() => this;
+
+        [DebuggerBrowsable(DebuggerBrowsableState.Never)]
         internal virtual bool IsCallable => this is ICallable;
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-ordinaryhasinstance
+        /// </summary>
+        internal virtual bool OrdinaryHasInstance(JsValue v)
+        {
+            if (!IsCallable)
+            {
+                return false;
+            }
+
+            var o = v as ObjectInstance;
+            if (o is null)
+            {
+                return false;
+            }
+
+            var p = Get(CommonProperties.Prototype);
+            if (p is not ObjectInstance)
+            {
+                ExceptionHelper.ThrowTypeError(o.Engine.Realm, $"Function has non-object prototype '{TypeConverter.ToString(p)}' in instanceof check");
+            }
+
+            while (true)
+            {
+                o = o.Prototype;
+
+                if (o is null)
+                {
+                    return false;
+                }
+
+                if (SameValue(p, o))
+                {
+                    return true;
+                }
+            }
+        }
 
         internal static bool SameValue(JsValue x, JsValue y)
         {
+            if (ReferenceEquals(x, y))
+            {
+                return true;
+            }
+
             var typea = x.Type;
             var typeb = y.Type;
 
@@ -638,7 +534,7 @@ namespace Jint.Native
 
                     return false;
                 case Types.String:
-                    return TypeConverter.ToString(x) == TypeConverter.ToString(y);
+                    return string.Equals(TypeConverter.ToString(x), TypeConverter.ToString(y), StringComparison.Ordinal);
                 case Types.Boolean:
                     return TypeConverter.ToBoolean(x) == TypeConverter.ToBoolean(y);
                 case Types.Undefined:
@@ -646,9 +542,21 @@ namespace Jint.Native
                     return true;
                 case Types.Symbol:
                     return x == y;
+                case Types.Object:
+                    return x is ObjectWrapper xo && y is ObjectWrapper yo && ReferenceEquals(xo.Target, yo.Target);
                 default:
-                    return ReferenceEquals(x, y);
+                    return false;
             }
+        }
+
+        internal static IConstructor AssertConstructor(Engine engine, JsValue c)
+        {
+            if (!c.IsConstructor)
+            {
+                ExceptionHelper.ThrowTypeError(engine.Realm, c + " is not a constructor");
+            }
+
+            return (IConstructor) c;
         }
     }
 }

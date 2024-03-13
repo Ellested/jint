@@ -1,7 +1,6 @@
-using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using Jint.Runtime;
+using Jint.Extensions;
 
 namespace Jint
 {
@@ -12,50 +11,40 @@ namespace Jint
     [DebuggerDisplay("{" + nameof(Name) + "}")]
     internal readonly struct Key : IEquatable<Key>
     {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private Key(string name)
         {
-            Name = name ?? ExceptionHelper.ThrowArgumentException<string>("name cannot be null");
-            HashCode = name.GetHashCode();
+            Name = name;
+            HashCode = Hash.GetFNVHashCode(name);
         }
 
         internal readonly string Name;
         internal readonly int HashCode;
 
-        public static implicit operator Key(string name)
-        {
-            return new Key(name);
-        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static implicit operator Key(string name) => new(name);
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static implicit operator string(Key key) => key.Name;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool operator ==(in Key a, in Key b)
         {
-            return a.HashCode == b.HashCode && a.Name == b.Name;
+            return a.HashCode == b.HashCode && string.Equals(a.Name, b.Name, StringComparison.Ordinal);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool operator !=(in Key a, in Key b)
         {
-            return a.HashCode != b.HashCode || a.Name != b.Name;
-        }
-
-        public static bool operator ==(in Key a, string b)
-        {
-            return a.Name == b;
-        }
-
-        public static bool operator !=(in Key a, string b)
-        {
-            return a.Name != b;
+            return a.HashCode != b.HashCode || !string.Equals(a.Name, b.Name, StringComparison.Ordinal);
         }
 
         public bool Equals(Key other)
         {
-            return HashCode == other.HashCode && Name == other.Name;
+            return HashCode == other.HashCode && string.Equals(Name, other.Name, StringComparison.Ordinal);
         }
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         {
             return obj is Key other && Equals(other);
         }

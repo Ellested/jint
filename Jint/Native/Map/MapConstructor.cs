@@ -1,84 +1,97 @@
-﻿using Jint.Collections;
+#pragma warning disable CA1859 // Use concrete types when possible for improved performance -- most of constructor methods return JsValue
+
+using Jint.Collections;
 using Jint.Native.Function;
 using Jint.Native.Iterator;
 using Jint.Native.Object;
 using Jint.Native.Symbol;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
-using Jint.Runtime.Descriptors.Specialized;
 using Jint.Runtime.Interop;
 
-namespace Jint.Native.Map
+namespace Jint.Native.Map;
+
+internal sealed class MapConstructor : Constructor
 {
-    public sealed class MapConstructor : FunctionInstance, IConstructor
+    private static readonly JsString _functionName = new("Map");
+
+    internal MapConstructor(
+        Engine engine,
+        Realm realm,
+        FunctionPrototype functionPrototype,
+        ObjectPrototype objectPrototype)
+        : base(engine, realm, _functionName)
     {
-        private static readonly JsString _functionName = new JsString("Map");
+        _prototype = functionPrototype;
+        PrototypeObject = new MapPrototype(engine, realm, this, objectPrototype);
+        _length = new PropertyDescriptor(0, PropertyFlag.Configurable);
+        _prototypeDescriptor = new PropertyDescriptor(PrototypeObject, PropertyFlag.AllForbidden);
+    }
 
-        private MapConstructor(Engine engine)
-            : base(engine, _functionName)
+    private MapPrototype PrototypeObject { get; }
+
+    protected override void Initialize()
+    {
+        const PropertyFlag PropertyFlags = PropertyFlag.Writable | PropertyFlag.Configurable;
+        var properties = new PropertyDictionary(1, checkExistingKeys: false)
         {
+            ["groupBy"] = new(new ClrFunction(Engine, "groupBy", GroupBy, 2, PropertyFlag.Configurable), PropertyFlags),
+        };
+        SetProperties(properties);
+
+        var symbols = new SymbolDictionary(1)
+        {
+            [GlobalSymbolRegistry.Species] = new GetSetPropertyDescriptor(get: new ClrFunction(_engine, "get [Symbol.species]", Species, 0, PropertyFlag.Configurable), set: Undefined, PropertyFlag.Configurable)
+        };
+        SetSymbols(symbols);
+    }
+
+    private static JsValue Species(JsValue thisObject, JsValue[] arguments)
+    {
+        return thisObject;
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-map-iterable
+    /// </summary>
+    public override ObjectInstance Construct(JsValue[] arguments, JsValue newTarget)
+    {
+        if (newTarget.IsUndefined())
+        {
+            ExceptionHelper.ThrowTypeError(_realm);
         }
 
-        public MapPrototype PrototypeObject { get; private set; }
+        var map = OrdinaryCreateFromConstructor(
+            newTarget,
+            static intrinsics => intrinsics.Map.PrototypeObject,
+            static (Engine engine, Realm realm, object? _) => new JsMap(engine, realm));
 
-        public static MapConstructor CreateMapConstructor(Engine engine)
+        if (arguments.Length > 0 && !arguments[0].IsNullOrUndefined())
         {
-            var obj = new MapConstructor(engine)
-            {
-                _prototype = engine.Function.PrototypeObject
-            };
+            var adder = map.Get("set");
+            var iterator = arguments.At(0).GetIterator(_realm);
 
-            // The value of the [[Prototype]] internal property of the Map constructor is the Function prototype object
-            obj.PrototypeObject = MapPrototype.CreatePrototypeObject(engine, obj);
-
-            obj._length = new PropertyDescriptor(0, PropertyFlag.Configurable);
-
-            // The initial value of Map.prototype is the Map prototype object
-            obj._prototypeDescriptor = new PropertyDescriptor(obj.PrototypeObject, PropertyFlag.AllForbidden);
-
-            return obj;
+            IteratorProtocol.AddEntriesFromIterable(map, iterator, adder);
         }
 
-        protected override void Initialize()
+        return map;
+    }
+
+
+    /// <summary>
+    /// https://tc39.es/proposal-array-grouping/#sec-map.groupby
+    /// </summary>
+    private JsValue GroupBy(JsValue thisObject, JsValue[] arguments)
+    {
+        var items = arguments.At(0);
+        var callbackfn = arguments.At(1);
+        var grouping = GroupByHelper.GroupBy(_engine, _realm, items, callbackfn, mapMode: true);
+        var map = (JsMap) Construct(_realm.Intrinsics.Map);
+        foreach (var pair in grouping)
         {
-            var symbols = new SymbolDictionary(1)
-            {
-                [GlobalSymbolRegistry.Species] = new GetSetPropertyDescriptor(get: new ClrFunctionInstance(_engine, "get [Symbol.species]", Species, 0, PropertyFlag.Configurable), set: Undefined, PropertyFlag.Configurable)
-            };
-            SetSymbols(symbols);
+            map.MapSet(pair.Key, pair.Value);
         }
 
-        private static JsValue Species(JsValue thisObject, JsValue[] arguments)
-        {
-            return thisObject;
-        }
-
-        public override JsValue Call(JsValue thisObject, JsValue[] arguments)
-        {
-            if (thisObject.IsUndefined())
-            {
-                ExceptionHelper.ThrowTypeError(_engine, "Constructor Map requires 'new'");
-            }
-
-            return Construct(arguments, thisObject);
-        }
-
-        public ObjectInstance Construct(JsValue[] arguments, JsValue newTarget)
-        {
-            var map = new MapInstance(Engine)
-            {
-                _prototype = PrototypeObject
-            };
-
-            if (arguments.Length > 0 && !arguments[0].IsNullOrUndefined())
-            {
-                var adder = map.Get("set");
-                var iterator = arguments.At(0).GetIterator(_engine);
-
-                IteratorProtocol.AddEntriesFromIterable(map, iterator, adder);
-            }
-
-            return map;
-        }
+        return map;
     }
 }

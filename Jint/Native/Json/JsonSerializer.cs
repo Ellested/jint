@@ -1,59 +1,98 @@
-﻿using System.Collections.Generic;
-using System.Linq;
-using Jint.Native.Array;
-using Jint.Native.Global;
+using System.Globalization;
+using System.Runtime.CompilerServices;
+using System.Text;
+using Jint.Collections;
+using Jint.Native.BigInt;
+using Jint.Native.Boolean;
+using Jint.Native.Number;
 using Jint.Native.Object;
+using Jint.Native.String;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
+using Jint.Runtime.Interop;
 
 namespace Jint.Native.Json
 {
-    public class JsonSerializer
+    public sealed class JsonSerializer
     {
         private readonly Engine _engine;
+        private ObjectTraverseStack _stack = null!;
+        private string? _indent;
+        private string _gap = string.Empty;
+        private List<JsValue>? _propertyList;
+        private JsValue _replacerFunction = JsValue.Undefined;
+
+        private static readonly JsString toJsonProperty = new("toJSON");
 
         public JsonSerializer(Engine engine)
         {
             _engine = engine;
         }
 
-        Stack<object> _stack;
-        string _indent, _gap;
-        List<JsValue> _propertyList;
-        JsValue _replacerFunction = Undefined.Instance;
+        public JsValue Serialize(JsValue value)
+        {
+            return Serialize(value, JsValue.Undefined, JsValue.Undefined);
+        }
 
         public JsValue Serialize(JsValue value, JsValue replacer, JsValue space)
         {
-            _stack = new Stack<object>();
+            _stack = new ObjectTraverseStack(_engine);
 
             // for JSON.stringify(), any function passed as the first argument will return undefined
             // if the replacer is not defined. The function is not called either.
-            if (value is ICallable callable && ReferenceEquals(replacer, Undefined.Instance))
+            if (value.IsCallable && ReferenceEquals(replacer, JsValue.Undefined))
             {
-                return Undefined.Instance;
+                return JsValue.Undefined;
             }
 
-            if (replacer.IsObject())
-            {
-                if (replacer is ICallable)
-                {
-                    _replacerFunction = replacer;
-                }
-                else
-                {
-                    var replacerObj = replacer.AsObject();
-                    if (replacerObj.Class == ObjectClass.Array)
-                    {
-                        _propertyList = new List<JsValue>();
-                    }
+            SetupReplacer(replacer);
+            _gap = BuildSpacingGap(space);
 
-                    foreach (var property in replacerObj.GetOwnProperties().Select(x => x.Value))
+            var wrapper = _engine.Realm.Intrinsics.Object.Construct(Arguments.Empty);
+            wrapper.DefineOwnProperty(JsString.Empty, new PropertyDescriptor(value, PropertyFlag.ConfigurableEnumerableWritable));
+
+            string result;
+            var json = new ValueStringBuilder();
+            try
+            {
+                if (SerializeJSONProperty(JsString.Empty, wrapper, ref json) == SerializeResult.Undefined)
+                {
+                    return JsValue.Undefined;
+                }
+            }
+            finally
+            {
+                result = json.ToString();
+            }
+            return new JsString(result);
+        }
+
+        private void SetupReplacer(JsValue replacer)
+        {
+            if (replacer is not ObjectInstance oi)
+            {
+                return;
+            }
+
+            if (oi.IsCallable)
+            {
+                _replacerFunction = replacer;
+            }
+            else
+            {
+                if (oi.IsArray())
+                {
+                    _propertyList = new List<JsValue>();
+                    var len = oi.GetLength();
+                    var k = 0;
+                    while (k < len)
                     {
-                        JsValue v = _engine.GetValue(property, false);
-                        string item = null;
+                        var prop = JsString.Create(k);
+                        var v = replacer.Get(prop);
+                        var item = JsValue.Undefined;
                         if (v.IsString())
                         {
-                            item = v.ToString();
+                            item = v;
                         }
                         else if (v.IsNumber())
                         {
@@ -61,22 +100,25 @@ namespace Jint.Native.Json
                         }
                         else if (v.IsObject())
                         {
-                            var propertyObj = v.AsObject();
-                            if (propertyObj.Class == ObjectClass.String || propertyObj.Class == ObjectClass.Number)
+                            if (v is StringInstance or NumberInstance)
                             {
                                 item = TypeConverter.ToString(v);
                             }
                         }
 
-                        if (item != null && !_propertyList.Contains(item))
+                        if (!item.IsUndefined() && !_propertyList.Contains(item))
                         {
                             _propertyList.Add(item);
                         }
 
+                        k++;
                     }
                 }
             }
+        }
 
+        private static string BuildSpacingGap(JsValue space)
+        {
             if (space.IsObject())
             {
                 var spaceObj = space.AsObject();
@@ -96,265 +138,463 @@ namespace Jint.Native.Json
                 var number = ((JsNumber) space)._value;
                 if (number > 0)
                 {
-                    _gap = new string(' ', (int) System.Math.Min(10, number));
+                    return new string(' ', (int) System.Math.Min(10, number));
                 }
-                else
-                {
-                    _gap = string.Empty;
-                }
+
+                return string.Empty;
             }
-            else if (space.IsString())
+
+            if (space.IsString())
             {
                 var stringSpace = space.ToString();
-                _gap = stringSpace.Length <= 10 ? stringSpace : stringSpace.Substring(0, 10);
-            }
-            else
-            {
-                _gap = string.Empty;
+                return stringSpace.Length <= 10 ? stringSpace : stringSpace.Substring(0, 10);
             }
 
-            var wrapper = _engine.Object.Construct(Arguments.Empty);
-            wrapper.DefineOwnProperty(JsString.Empty, new PropertyDescriptor(value, PropertyFlag.ConfigurableEnumerableWritable));
-
-            return Str(JsString.Empty, wrapper);
+            return string.Empty;
         }
 
-        private JsValue Str(JsValue key, ObjectInstance holder)
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-serializejsonproperty
+        /// </summary>
+        private SerializeResult SerializeJSONProperty(JsValue key, JsValue holder, ref ValueStringBuilder json)
         {
+            var value = ReadUnwrappedValue(key, holder);
 
-            var value = holder.Get(key, holder);
-            if (value.IsObject())
+            if (ReferenceEquals(value, JsValue.Null))
             {
-                var toJson = value.AsObject().Get("toJSON", value);
-                if (toJson.IsObject())
-                {
-                    if (toJson.AsObject() is ICallable callableToJson)
-                    {
-                        value = callableToJson.Call(value, Arguments.From(key));
-                    }
-                }
-            }
-
-            if (!ReferenceEquals(_replacerFunction, Undefined.Instance))
-            {
-                var replacerFunctionCallable = (ICallable)_replacerFunction.AsObject();
-                value = replacerFunctionCallable.Call(holder, Arguments.From(key, value));
-            }
-
-
-            if (value.IsObject())
-            {
-                var valueObj = value.AsObject();
-                switch (valueObj.Class)
-                {
-                    case ObjectClass.Number:
-                        value = TypeConverter.ToNumber(value);
-                        break;
-                    case ObjectClass.String:
-                        value = TypeConverter.ToString(value);
-                        break;
-                    case ObjectClass.Boolean:
-                        value = TypeConverter.ToPrimitive(value);
-                        break;
-                    case ObjectClass.Array:
-                        value = SerializeArray(value.As<ArrayInstance>());
-                        return value;
-                    case ObjectClass.Object:
-                        value = SerializeObject(value.AsObject());
-                        return value;
-                }
-            }
-
-            if (ReferenceEquals(value, Null.Instance))
-            {
-                return "null";
+                json.Append("null");
+                return SerializeResult.NotUndefined;
             }
 
             if (value.IsBoolean())
             {
-                return ((JsBoolean) value)._value ? "true" : "false";
+                json.Append(((JsBoolean) value)._value ? "true" : "false");
+                return SerializeResult.NotUndefined;
             }
 
             if (value.IsString())
             {
-                return Quote(value.ToString());
+                QuoteJSONString(value.ToString(), ref json);
+                return SerializeResult.NotUndefined;
             }
 
             if (value.IsNumber())
             {
-                var isFinite = GlobalObject.IsFinite(Undefined.Instance, Arguments.From(value));
-                if (((JsBoolean) isFinite)._value)
+                var doubleValue = ((JsNumber) value)._value;
+
+                if (value.IsInteger())
                 {
-                    return TypeConverter.ToJsString(value);
+                    json.Append(((long) doubleValue).ToString(CultureInfo.InvariantCulture));
+                    return SerializeResult.NotUndefined;
                 }
 
-                return "null";
+                var isFinite = !double.IsNaN(doubleValue) && !double.IsInfinity(doubleValue);
+                if (isFinite)
+                {
+                    if (TypeConverter.CanBeStringifiedAsLong(doubleValue))
+                    {
+                        json.Append(((long) doubleValue).ToString(CultureInfo.InvariantCulture));
+                        return SerializeResult.NotUndefined;
+                    }
+
+                    json.Append(NumberPrototype.ToNumberString(doubleValue));
+                    return SerializeResult.NotUndefined;
+                }
+
+                json.Append("null");
+                return SerializeResult.NotUndefined;
             }
 
-            var isCallable = value.IsObject() && value.AsObject() is ICallable;
-
-            if (value.IsObject() && isCallable == false)
+            if (value.IsBigInt())
             {
-                if (value.AsObject().Class == ObjectClass.Array)
-                {
-                    return SerializeArray(value.As<ArrayInstance>());
-                }
-
-                return SerializeObject(value.AsObject());
+                ExceptionHelper.ThrowTypeError(_engine.Realm, "Do not know how to serialize a BigInt");
             }
 
-            return JsValue.Undefined;
+            if (value is ObjectInstance { IsCallable: false } objectInstance)
+            {
+                if (CanSerializesAsArray(objectInstance))
+                {
+                    SerializeJSONArray(objectInstance, ref json);
+                    return SerializeResult.NotUndefined;
+                }
+
+                if (objectInstance is IObjectWrapper wrapper
+                    && _engine.Options.Interop.SerializeToJson is { } serialize)
+                {
+                    json.Append(serialize(wrapper.Target));
+                    return SerializeResult.NotUndefined;
+                }
+
+                SerializeJSONObject(objectInstance, ref json);
+                return SerializeResult.NotUndefined;
+            }
+
+            return SerializeResult.Undefined;
         }
 
-        private static string Quote(string value)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private JsValue ReadUnwrappedValue(JsValue key, JsValue holder)
         {
-            var sb = new System.Text.StringBuilder("\"");
+            var value = holder.Get(key);
 
-            foreach (char c in value)
+            if (value._type <= InternalTypes.Integer && _replacerFunction.IsUndefined())
             {
-                switch (c)
+                return value;
+            }
+
+            var isBigInt = value is BigIntInstance || value.IsBigInt();
+            if (value.IsObject() || isBigInt)
+            {
+                var toJson = value.GetV(_engine.Realm, toJsonProperty);
+                if (toJson.IsUndefined() && isBigInt)
                 {
-                    case '\"':
-                        sb.Append("\\\"");
-                        break;
-                    case '\\':
-                        sb.Append("\\\\");
-                        break;
-                    case '\b':
-                        sb.Append("\\b");
-                        break;
-                    case '\f':
-                        sb.Append("\\f");
-                        break;
-                    case '\n':
-                        sb.Append("\\n");
-                        break;
-                    case '\r':
-                        sb.Append("\\r");
-                        break;
-                    case '\t':
-                        sb.Append("\\t");
-                        break;
-                    default:
-                        if (c < 0x20)
-                        {
-                            sb.Append("\\u");
-                            sb.Append(((int) c).ToString("x4"));
-                        }
-                        else
-                            sb.Append(c);
-                        break;
+                    toJson = _engine.Realm.Intrinsics.BigInt.PrototypeObject.Get(toJsonProperty);
+                }
+                if (toJson.IsObject())
+                {
+                    if (toJson.AsObject() is ICallable callableToJson)
+                    {
+                        value = callableToJson.Call(value, Arguments.From(TypeConverter.ToPropertyKey(key)));
+                    }
                 }
             }
 
-            sb.Append("\"");
-            return sb.ToString();
+            if (!_replacerFunction.IsUndefined())
+            {
+                var replacerFunctionCallable = (ICallable) _replacerFunction.AsObject();
+                value = replacerFunctionCallable.Call(holder, Arguments.From(TypeConverter.ToPropertyKey(key), value));
+            }
+
+            if (value.IsObject())
+            {
+                value = value switch
+                {
+                    NumberInstance => TypeConverter.ToNumber(value),
+                    StringInstance => TypeConverter.ToString(value),
+                    BooleanInstance booleanInstance => booleanInstance.BooleanData,
+                    BigIntInstance bigIntInstance => bigIntInstance.BigIntData,
+                    _ => value
+                };
+            }
+
+            return value;
         }
 
-        private string SerializeArray(ArrayInstance value)
+        private static bool CanSerializesAsArray(ObjectInstance value)
         {
-            EnsureNonCyclicity(value);
-            _stack.Push(value);
+            if (value is JsArray)
+            {
+                return true;
+            }
+
+            if (value is JsProxy proxyInstance && CanSerializesAsArray(proxyInstance._target))
+            {
+                return true;
+            }
+
+            if (value is ObjectWrapper { IsArrayLike: true })
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-quotejsonstring
+        /// </summary>
+        /// <remarks>
+        /// MethodImplOptions.AggressiveOptimization = 512 which is only exposed in .NET Core.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining | (MethodImplOptions) 512)]
+        private static unsafe void QuoteJSONString(string value, ref ValueStringBuilder json)
+        {
+            if (value.Length == 0)
+            {
+                json.Append("\"\"");
+                return;
+            }
+
+            json.Append('"');
+
+#if NETCOREAPP1_0_OR_GREATER
+            fixed (char* ptr = value)
+            {
+                int remainingLength = value.Length;
+                int offset = 0;
+                while (true)
+                {
+                    int index = System.Text.Encodings.Web.JavaScriptEncoder.Default.FindFirstCharacterToEncode(ptr + offset, remainingLength);
+                    if (index < 0)
+                    {
+                        // append the remaining text which doesn't need any encoding.
+                        json.Append(value.AsSpan(offset));
+                        break;
+                    }
+
+                    index += offset;
+                    if (index - offset > 0)
+                    {
+                        // append everything which does not need any encoding until the found index.
+                        json.Append(value.AsSpan(offset, index - offset));
+                    }
+
+                    AppendJsonStringCharacter(value, ref index, ref json);
+
+                    offset = index + 1;
+                    remainingLength = value.Length - offset;
+                    if (remainingLength == 0)
+                    {
+                        break;
+                    }
+                }
+            }
+#else
+            for (var i = 0; i < value.Length; i++)
+            {
+                AppendJsonStringCharacter(value, ref i, ref json);
+            }
+#endif
+            json.Append('"');
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void AppendJsonStringCharacter(string value, ref int index, ref ValueStringBuilder json)
+        {
+            var c = value[index];
+            switch (c)
+            {
+                case '\"':
+                    json.Append("\\\"");
+                    break;
+                case '\\':
+                    json.Append("\\\\");
+                    break;
+                case '\b':
+                    json.Append("\\b");
+                    break;
+                case '\f':
+                    json.Append("\\f");
+                    break;
+                case '\n':
+                    json.Append("\\n");
+                    break;
+                case '\r':
+                    json.Append("\\r");
+                    break;
+                case '\t':
+                    json.Append("\\t");
+                    break;
+                default:
+                    if (char.IsSurrogatePair(value, index))
+                    {
+#if NETCOREAPP1_0_OR_GREATER
+                        json.Append(value.AsSpan(index, 2));
+                        index++;
+#else
+                        json.Append(c);
+                        index++;
+                        json.Append(value[index]);
+#endif
+                    }
+                    else if (c < 0x20 || char.IsSurrogate(c))
+                    {
+                        json.Append("\\u");
+                        json.Append(((int) c).ToString("x4", CultureInfo.InvariantCulture));
+                    }
+                    else
+                    {
+                        json.Append(c);
+                    }
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-serializejsonarray
+        /// </summary>
+        private void SerializeJSONArray(ObjectInstance value, ref ValueStringBuilder json)
+        {
+            var len = TypeConverter.ToUint32(value.Get(CommonProperties.Length));
+            if (len == 0)
+            {
+                json.Append("[]");
+                return;
+            }
+
+            _stack.Enter(value);
             var stepback = _indent;
-            _indent = _indent + _gap;
-            var partial = new List<string>();
-            var len = TypeConverter.ToUint32(value.Get(CommonProperties.Length, value));
+            if (_gap.Length > 0)
+            {
+                _indent += _gap;
+            }
+
+            const char separator = ',';
+            bool hasPrevious = false;
+
             for (int i = 0; i < len; i++)
             {
-                var strP = Str(TypeConverter.ToString(i), value);
-                if (strP.IsUndefined())
-                    strP = "null";
-                partial.Add(strP.ToString());
-            }
-            if (partial.Count == 0)
-            {
-                _stack.Pop();
-                return "[]";
-            }
-
-            string final;
-            if (_gap == "")
-            {
-                var separator = ",";
-                var properties = System.String.Join(separator, partial.ToArray());
-                final = "[" + properties + "]";
-            }
-            else
-            {
-                var separator = ",\n" + _indent;
-                var properties = System.String.Join(separator, partial.ToArray());
-                final = "[\n" + _indent + properties + "\n" + stepback + "]";
-            }
-
-            _stack.Pop();
-            _indent = stepback;
-            return final;
-        }
-
-        private void EnsureNonCyclicity(object value)
-        {
-            if (value == null)
-            {
-                ExceptionHelper.ThrowArgumentNullException(nameof(value));
-            }
-
-            if (_stack.Contains(value))
-            {
-                ExceptionHelper.ThrowTypeError(_engine, "Cyclic reference detected.");
-            }
-        }
-
-        private string SerializeObject(ObjectInstance value)
-        {
-            string final;
-
-            EnsureNonCyclicity(value);
-            _stack.Push(value);
-            var stepback = _indent;
-            _indent += _gap;
-
-            var k = _propertyList ?? value.GetOwnProperties()
-                .Where(x => x.Value.Enumerable)
-                .Select(x => x.Key)
-                .ToList();
-
-            var partial = new List<string>();
-            foreach (var p in k)
-            {
-                var strP = Str(p, value);
-                if (!strP.IsUndefined())
+                if (hasPrevious)
                 {
-                    var member = Quote(p.ToString()) + ":";
-                    if (_gap != "")
-                    {
-                        member += " ";
-                    }
-                    member += strP.AsString(); // TODO:This could be undefined
-                    partial.Add(member);
-                }
-            }
-            if (partial.Count == 0)
-            {
-                final = "{}";
-            }
-            else
-            {
-                if (_gap == "")
-                {
-                    var separator = ",";
-                    var properties = System.String.Join(separator, partial.ToArray());
-                    final = "{" + properties + "}";
+                    json.Append(separator);
                 }
                 else
                 {
-                    var separator = ",\n" + _indent;
-                    var properties = System.String.Join(separator, partial.ToArray());
-                    final = "{\n" + _indent + properties + "\n" + stepback + "}";
+                    json.Append('[');
+                }
+
+                if (_gap.Length > 0)
+                {
+                    json.Append('\n');
+                    json.Append(_indent);
+                }
+
+                if (SerializeJSONProperty(i, value, ref json) == SerializeResult.Undefined)
+                {
+                    json.Append("null");
+                }
+
+                hasPrevious = true;
+            }
+
+            if (!hasPrevious)
+            {
+                _stack.Exit();
+                _indent = stepback;
+                json.Append("[]");
+                return;
+            }
+
+            if (_gap.Length > 0)
+            {
+                json.Append('\n');
+                json.Append(stepback);
+            }
+            json.Append(']');
+
+            _stack.Exit();
+            _indent = stepback;
+        }
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-serializejsonobject
+        /// </summary>
+        private void SerializeJSONObject(ObjectInstance value, ref ValueStringBuilder json)
+        {
+            var enumeration = _propertyList is null
+                ? PropertyEnumeration.FromObjectInstance(value)
+                : PropertyEnumeration.FromList(_propertyList);
+            if (enumeration.IsEmpty)
+            {
+                json.Append("{}");
+                return;
+            }
+
+            _stack.Enter(value);
+            var stepback = _indent;
+            if (_gap.Length > 0)
+            {
+                _indent += _gap;
+            }
+
+            const char separator = ',';
+            var hasPrevious = false;
+            for (var i = 0; i < enumeration.Keys.Count; i++)
+            {
+                var p = enumeration.Keys[i];
+                int position = json.Length;
+
+                if (hasPrevious)
+                {
+                    json.Append(separator);
+                }
+                else
+                {
+                    json.Append('{');
+                }
+
+                if (_gap.Length > 0)
+                {
+                    json.Append('\n');
+                    json.Append(_indent);
+                }
+
+                QuoteJSONString(p.ToString(), ref json);
+                json.Append(':');
+                if (_gap.Length > 0)
+                {
+                    json.Append(' ');
+                }
+
+                if (SerializeJSONProperty(p, value, ref json) == SerializeResult.Undefined)
+                {
+                    json.Length = position;
+                }
+                else
+                {
+                    hasPrevious = true;
                 }
             }
-            _stack.Pop();
+
+            if (!hasPrevious)
+            {
+                _stack.Exit();
+                _indent = stepback;
+                json.Append("{}");
+                return;
+            }
+
+            if (_gap.Length > 0)
+            {
+                json.Append('\n');
+                json.Append(stepback);
+            }
+            json.Append('}');
+
+            _stack.Exit();
             _indent = stepback;
-            return final;
+        }
+
+        private enum SerializeResult
+        {
+            NotUndefined,
+            Undefined
+        }
+
+        private readonly struct PropertyEnumeration
+        {
+            private PropertyEnumeration(List<JsValue> keys, bool isEmpty)
+            {
+                Keys = keys;
+                IsEmpty = isEmpty;
+            }
+
+            public static PropertyEnumeration FromList(List<JsValue> keys)
+                => new PropertyEnumeration(keys, keys.Count == 0);
+
+            public static PropertyEnumeration FromObjectInstance(ObjectInstance instance)
+            {
+                var allKeys = instance.GetOwnPropertyKeys(Types.String);
+                RemoveUnserializableProperties(instance, allKeys);
+                return new PropertyEnumeration(allKeys, allKeys.Count == 0);
+            }
+
+            private static void RemoveUnserializableProperties(ObjectInstance instance, List<JsValue> keys)
+            {
+                for (var i = 0; i < keys.Count; i++)
+                {
+                    var key = keys[i];
+                    var desc = instance.GetOwnProperty(key);
+                    if (desc == PropertyDescriptor.Undefined || !desc.Enumerable)
+                    {
+                        keys.RemoveAt(i);
+                        i--;
+                    }
+                }
+            }
+
+            public readonly List<JsValue> Keys;
+            public readonly bool IsEmpty;
         }
     }
 }

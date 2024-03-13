@@ -1,203 +1,259 @@
-﻿using System.Collections.Generic;
-using System.Linq;
+using Esprima;
 using Esprima.Ast;
 using Jint.Native;
-using Jint.Runtime.Environments;
+using Jint.Runtime.Interpreter;
 
 namespace Jint.Runtime.Debugger
 {
-    internal class DebugHandler
+    public enum PauseType
     {
-        private readonly Stack<string> _debugCallStack;
-        private StepMode _stepMode;
-        private int _callBackStepOverDepth;
-        private readonly Engine _engine;
+        Skip,
+        Step,
+        Break,
+        DebuggerStatement
+    }
 
-        public DebugHandler(Engine engine)
+    public class DebugHandler
+    {
+        public delegate void BeforeEvaluateEventHandler(object sender, Program ast);
+        public delegate StepMode DebugEventHandler(object sender, DebugInformation e);
+
+        private readonly Engine _engine;
+        private bool _paused;
+        private int _steppingDepth;
+
+        /// <summary>
+        /// Triggered before the engine executes/evaluates the parsed AST of a script or module.
+        /// </summary>
+        public event BeforeEvaluateEventHandler? BeforeEvaluate;
+
+        /// <summary>
+        /// The Step event is triggered before the engine executes a step-eligible execution point.
+        /// </summary>
+        /// <remarks>
+        /// If the current step mode is <see cref="StepMode.None"/>, this event is never triggered. The script may
+        /// still be paused by a debugger statement or breakpoint, but these will trigger the
+        /// <see cref="Break"/> event.
+        /// </remarks>
+        public event DebugEventHandler? Step;
+
+        /// <summary>
+        /// The Break event is triggered when a breakpoint or debugger statement is hit.
+        /// </summary>
+        /// <remarks>
+        /// This is event is not triggered if the current script location was reached by stepping. In that case, only
+        /// the <see cref="Step"/> event is triggered.
+        /// </remarks>
+        public event DebugEventHandler? Break;
+
+
+        /// <summary>
+        /// The Skip event is triggered for each execution point, when the point doesn't trigger a <see cref="Step"/>
+        /// or <see cref="Break"/> event.
+        /// </summary>
+        public event DebugEventHandler? Skip;
+
+        internal DebugHandler(Engine engine, StepMode initialStepMode)
         {
             _engine = engine;
-            _debugCallStack = new Stack<string>();
-            _stepMode = StepMode.Into;
+            HandleNewStepMode(initialStepMode);
         }
 
-        internal void PopDebugCallStack()
-        {
-            if (_debugCallStack.Count > 0)
-            {
-                _debugCallStack.Pop();
-            }
-            if (_stepMode == StepMode.Out && _debugCallStack.Count < _callBackStepOverDepth)
-            {
-                _callBackStepOverDepth = _debugCallStack.Count;
-                _stepMode = StepMode.Into;
-            }
-            else if (_stepMode == StepMode.Over && _debugCallStack.Count == _callBackStepOverDepth)
-            {
-                _callBackStepOverDepth = _debugCallStack.Count;
-                _stepMode = StepMode.Into;
-            }
-        }
+        private bool IsStepping => _engine.CallStack.Count <= _steppingDepth;
 
-        internal void AddToDebugCallStack(CallExpression callExpression)
-        {
-            if (callExpression.Callee is Identifier identifier)
-            {
-                var stack = identifier.Name + "(";
-                var paramStrings = new List<string>();
+        /// <summary>
+        /// The location of the current (step-eligible) AST node being executed.
+        /// </summary>
+        /// <remarks>
+        /// The location is available as long as DebugMode is enabled - i.e. even when not stepping
+        /// or hitting a breakpoint.
+        /// </remarks>
+        public Location? CurrentLocation { get; private set; }
 
-                foreach (var argument in callExpression.Arguments)
+        /// <summary>
+        /// Collection of active breakpoints for the engine.
+        /// </summary>
+        public BreakPointCollection BreakPoints { get; } = new BreakPointCollection();
+
+        /// <summary>
+        /// Evaluates a script (expression) within the current execution context.
+        /// </summary>
+        /// <remarks>
+        /// Internally, this is used for evaluating breakpoint conditions, but may also be used for e.g. watch lists
+        /// in a debugger.
+        /// </remarks>
+        public JsValue Evaluate(Script script)
+        {
+            var context = _engine._activeEvaluationContext;
+            if (context == null)
+            {
+                throw new DebugEvaluationException("Jint has no active evaluation context");
+            }
+            var callStackSize = _engine.CallStack.Count;
+
+            var list = new JintStatementList(null, script.Body);
+            Completion result;
+            try
+            {
+                result = list.Execute(context);
+            }
+            catch (Exception ex)
+            {
+                // An error in the evaluation may return a Throw Completion, or it may throw an exception:
+                throw new DebugEvaluationException("An error occurred during debugger evaluation", ex);
+            }
+            finally
+            {
+                // Restore call stack
+                while (_engine.CallStack.Count > callStackSize)
                 {
-                    if (argument != null)
-                    {
-                        paramStrings.Add(argument is Identifier argIdentifier ? argIdentifier.Name : "null");
-                    }
-                    else
-                    {
-                        paramStrings.Add("null");
-                    }
+                    _engine.CallStack.Pop();
                 }
+            }
 
-                stack += string.Join(", ", paramStrings);
-                stack += ")";
-                _debugCallStack.Push(stack);
+            if (result.Type == CompletionType.Throw)
+            {
+                // TODO: Should we return an error here? (avoid exception overhead, since e.g. breakpoint
+                // evaluation may be high volume.
+                var error = result.GetValueOrDefault();
+                var ex = new JavaScriptException(error).SetJavaScriptCallstack(_engine, result.Location);
+                throw new DebugEvaluationException("An error occurred during debugger evaluation", ex);
+            }
+
+            return result.GetValueOrDefault();
+        }
+
+        /// <inheritdoc cref="Evaluate(Script)" />
+        public JsValue Evaluate(string source, ParserOptions? options = null)
+        {
+            options ??= new ParserOptions();
+            var parser = new JavaScriptParser(options);
+            try
+            {
+                var script = parser.ParseScript(source, "evaluation");
+                return Evaluate(script);
+            }
+            catch (ParserException ex)
+            {
+                throw new DebugEvaluationException("An error occurred during debugger expression parsing", ex);
             }
         }
 
-        internal void OnStep(Statement statement)
+        internal void OnBeforeEvaluate(Program ast)
         {
-            var old = _stepMode;
-            if (statement == null)
+            if (ast != null)
+            {
+                BeforeEvaluate?.Invoke(_engine, ast);
+            }
+        }
+
+        internal void OnStep(Node node)
+        {
+            // Don't reenter if we're already paused (e.g. when evaluating a getter in a Break/Step handler)
+            if (_paused)
             {
                 return;
             }
+            _paused = true;
 
-            BreakPoint breakpoint = _engine.BreakPoints.FirstOrDefault(breakPoint => BpTest(statement, breakPoint));
-            bool breakpointFound = false;
-
-            if (breakpoint != null)
-            {
-                DebugInformation info = CreateDebugInformation(statement);
-                var result = _engine.InvokeBreakEvent(info);
-                if (result.HasValue)
-                {
-                    _stepMode = result.Value;
-                    breakpointFound = true;
-                }
-            }
-
-            if (breakpointFound == false && _stepMode == StepMode.Into)
-            {
-                DebugInformation info = CreateDebugInformation(statement);
-                var result = _engine.InvokeStepEvent(info);
-                if (result.HasValue)
-                {
-                    _stepMode = result.Value;
-                }
-            }
-
-            if (old == StepMode.Into && _stepMode == StepMode.Out)
-            {
-                _callBackStepOverDepth = _debugCallStack.Count;
-            }
-            else if (old == StepMode.Into && _stepMode == StepMode.Over)
-            {
-                if (statement is ExpressionStatement expressionStatement 
-                    && expressionStatement.Expression is CallExpression)
-                {
-                    _callBackStepOverDepth = _debugCallStack.Count;
-                }
-                else
-                {
-                    _stepMode = StepMode.Into;
-                }
-            }
+            CheckBreakPointAndPause(node, node.Location);
         }
 
-        private bool BpTest(Statement statement, BreakPoint breakpoint)
+        internal void OnReturnPoint(Node functionBody, JsValue returnValue)
         {
-            bool afterStart, beforeEnd;
-
-            afterStart = (breakpoint.Line == statement.Location.Start.Line &&
-                             breakpoint.Char >= statement.Location.Start.Column);
-
-            if (!afterStart)
+            // Don't reenter if we're already paused (e.g. when evaluating a getter in a Break/Step handler)
+            if (_paused)
             {
-                return false;
+                return;
             }
+            _paused = true;
 
-            beforeEnd = breakpoint.Line < statement.Location.End.Line
-                        || (breakpoint.Line == statement.Location.End.Line &&
-                            breakpoint.Char <= statement.Location.End.Column);
+            var bodyLocation = functionBody.Location;
+            var functionBodyEnd = bodyLocation.End;
+            var location = Location.From(functionBodyEnd, functionBodyEnd, bodyLocation.Source);
 
-            if (!beforeEnd)
-            {
-                return false;
-            }
-
-            if (!string.IsNullOrEmpty(breakpoint.Condition))
-            {
-                var completionValue = _engine.Execute(breakpoint.Condition).GetCompletionValue();
-                return ((JsBoolean) completionValue)._value;
-            }
-
-            return true;
+            CheckBreakPointAndPause(node: null, location, returnValue);
         }
 
-        private DebugInformation CreateDebugInformation(Statement statement)
+        private void CheckBreakPointAndPause(
+            Node? node,
+            Location location,
+            JsValue? returnValue = null)
         {
-            var info = new DebugInformation
+            CurrentLocation = location;
+
+            // Even if we matched a breakpoint, if we're stepping, the reason we're pausing is the step.
+            // Still, we need to include the breakpoint at this location, in case the debugger UI needs to update
+            // e.g. a hit count.
+            var breakLocation = new BreakLocation(location.Source, location.Start);
+            var breakPoint = BreakPoints.FindMatch(this, breakLocation);
+
+            PauseType pauseType;
+
+            if (IsStepping)
             {
-                CurrentStatement = statement,
-                CallStack = _debugCallStack,
-                CurrentMemoryUsage = _engine.CurrentMemoryUsage
+                pauseType = PauseType.Step;
+            }
+            else if (breakPoint != null)
+            {
+                pauseType = PauseType.Break;
+            }
+            else if (node?.Type == Nodes.DebuggerStatement &&
+                _engine.Options.Debugger.StatementHandling == DebuggerStatementHandling.Script)
+            {
+                pauseType = PauseType.DebuggerStatement;
+            }
+            else
+            {
+                pauseType = PauseType.Skip;
+            }
+
+            Pause(pauseType, node, location, returnValue, breakPoint);
+
+            _paused = false;
+        }
+
+        private void Pause(
+            PauseType type,
+            Node? node,
+            Location location,
+            JsValue? returnValue = null,
+            BreakPoint? breakPoint = null)
+        {
+            var info = new DebugInformation(
+                engine: _engine,
+                currentNode: node,
+                currentLocation: location,
+                returnValue: returnValue,
+                currentMemoryUsage: _engine.CurrentMemoryUsage,
+                pauseType: type,
+                breakPoint: breakPoint
+            );
+
+            StepMode? result = type switch
+            {
+                // Conventionally, sender should be DebugHandler - but Engine is more useful
+                PauseType.Skip => Skip?.Invoke(_engine, info),
+                PauseType.Step => Step?.Invoke(_engine, info),
+                PauseType.Break => Break?.Invoke(_engine, info),
+                PauseType.DebuggerStatement => Break?.Invoke(_engine, info),
+                _ => throw new ArgumentException("Invalid pause type", nameof(type))
             };
 
-            if (_engine.ExecutionContext.VariableEnvironment != null)
-            {
-                var lexicalEnvironment = _engine.ExecutionContext.VariableEnvironment;
-                info.Locals = GetLocalVariables(lexicalEnvironment);
-                info.Globals = GetGlobalVariables(lexicalEnvironment);
-            }
-
-            return info;
+            HandleNewStepMode(result);
         }
 
-        private static Dictionary<string, JsValue> GetLocalVariables(LexicalEnvironment lex)
+        private void HandleNewStepMode(StepMode? newStepMode)
         {
-            Dictionary<string, JsValue> locals = new Dictionary<string, JsValue>();
-            if (!ReferenceEquals(lex?._record, null))
+            if (newStepMode != null)
             {
-                AddRecordsFromEnvironment(lex, locals);
-            }
-            return locals;
-        }
-
-        private static Dictionary<string, JsValue> GetGlobalVariables(LexicalEnvironment lex)
-        {
-            Dictionary<string, JsValue> globals = new Dictionary<string, JsValue>();
-            LexicalEnvironment tempLex = lex;
-
-            while (!ReferenceEquals(tempLex?._record, null))
-            {
-                AddRecordsFromEnvironment(tempLex, globals);
-                tempLex = tempLex._outer;
-            }
-            return globals;
-        }
-
-        private static void AddRecordsFromEnvironment(LexicalEnvironment lex, Dictionary<string, JsValue> locals)
-        {
-            var bindings = lex._record.GetAllBindingNames();
-            foreach (var binding in bindings)
-            {
-                if (locals.ContainsKey(binding) == false)
+                _steppingDepth = newStepMode switch
                 {
-                    var jsValue = lex._record.GetBindingValue(binding, false);
-                    if (jsValue.TryCast<ICallable>() == null)
-                    {
-                        locals.Add(binding, jsValue);
-                    }
-                }
+                    StepMode.Over => _engine.CallStack.Count,// Resume stepping when back at this level of the stack
+                    StepMode.Out => _engine.CallStack.Count - 1,// Resume stepping when we've popped the stack
+                    StepMode.None => int.MinValue,// Never step
+                    _ => int.MaxValue,// Always step
+                };
             }
         }
     }

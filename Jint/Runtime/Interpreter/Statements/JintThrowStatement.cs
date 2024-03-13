@@ -8,22 +8,20 @@ namespace Jint.Runtime.Interpreter.Statements
     /// </summary>
     internal sealed class JintThrowStatement : JintStatement<ThrowStatement>
     {
-        private JintExpression _argument;
+        private JintExpression _argument = null!;
 
-        public JintThrowStatement(Engine engine, ThrowStatement statement) : base(engine, statement)
+        public JintThrowStatement(ThrowStatement statement) : base(statement)
         {
-            _initialized = false;
         }
 
-        protected override void Initialize()
+        protected override void Initialize(EvaluationContext context)
         {
-            _argument = JintExpression.Build(_engine, _statement.Argument);
+            _argument = JintExpression.Build(_statement.Argument);
         }
 
-        protected override Completion ExecuteInternal()
+        protected override Completion ExecuteInternal(EvaluationContext context)
         {
-            var jsValue = _argument.GetValue();
-            return new Completion(CompletionType.Throw, jsValue, null, _statement.Location);
+            return new Completion(CompletionType.Throw, _argument.GetValue(context), _argument._expression);
         }
     }
 }

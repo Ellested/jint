@@ -6,37 +6,37 @@ namespace Jint.Runtime.Interpreter.Expressions
 {
     internal sealed class JintSpreadExpression : JintExpression
     {
-        private readonly JintExpression _argument;
-        private readonly string _argumentName;
+        internal readonly JintExpression _argument;
+        private readonly string? _argumentName;
 
-        public JintSpreadExpression(Engine engine, SpreadElement expression) : base(engine, expression)
+        public JintSpreadExpression(SpreadElement expression) : base(expression)
         {
-            _argument = Build(engine, expression.Argument);
+            _argument = Build(expression.Argument);
             _argumentName = (expression.Argument as Identifier)?.Name;
         }
 
-        protected override object EvaluateInternal()
+        protected override object EvaluateInternal(EvaluationContext context)
         {
-            GetValueAndCheckIterator(out var objectInstance, out var iterator);
+            GetValueAndCheckIterator(context, out var objectInstance, out var iterator);
             return objectInstance;
         }
 
-        public override JsValue GetValue()
+        public override JsValue GetValue(EvaluationContext context)
         {
             // need to notify correct node when taking shortcut
-            _engine._lastSyntaxNode = _expression;
+            context.LastSyntaxElement = _expression;
 
-            GetValueAndCheckIterator(out var objectInstance, out var iterator);
+            GetValueAndCheckIterator(context, out var objectInstance, out var iterator);
             return objectInstance;
         }
 
-        internal void GetValueAndCheckIterator(out JsValue instance, out IIterator iterator)
+        internal void GetValueAndCheckIterator(EvaluationContext context, out JsValue instance, out IteratorInstance? iterator)
         {
-            instance = _argument.GetValue();
-            if (instance is null || !instance.TryGetIterator(_engine, out iterator))
+            instance = _argument.GetValue(context);
+            if (instance is null || !instance.TryGetIterator(context.Engine.Realm, out iterator))
             {
                 iterator = null;
-                ExceptionHelper.ThrowTypeError(_engine, _argumentName + " is not iterable");
+                ExceptionHelper.ThrowTypeError(context.Engine.Realm, _argumentName + " is not iterable");
             }
         }
     }

@@ -1,124 +1,268 @@
-[![Build status](https://ci.appveyor.com/api/projects/status/xh2lsliy6usk60o5?svg=true)](https://ci.appveyor.com/project/SebastienRos/jint)
+[![Build](https://github.com/sebastienros/jint/actions/workflows/build.yml/badge.svg)](https://github.com/sebastienros/jint/actions/workflows/build.yml)
 [![NuGet](https://img.shields.io/nuget/v/Jint.svg)](https://www.nuget.org/packages/Jint)
-[![MyGet](https://img.shields.io/myget/jint/v/jint.svg)](https://www.myget.org/feed/Packages/jint)
+[![NuGet](https://img.shields.io/nuget/vpre/Jint.svg)](https://www.nuget.org/packages/Jint)
+[![MyGet](https://img.shields.io/myget/jint/vpre/jint.svg?label=MyGet)](https://www.myget.org/feed/jint/package/nuget/Jint)
 [![Join the chat at https://gitter.im/sebastienros/jint](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/sebastienros/jint)
 
 # Jint
 
-Jint is a __Javascript interpreter__ for .NET which provides full __ECMA 5.1__ compliance and can run on __any .NET platform__. Because it doesn't generate any .NET bytecode nor use the DLR it runs relatively small scripts faster. It's available as a PCL on Nuget at https://www.nuget.org/packages/Jint.
+Jint is a __Javascript interpreter__ for .NET which can run on __any modern .NET platform__ as it supports .NET Standard 2.0 and .NET 4.6.2 targets (and later).
 
-# Features
+## Use cases and users
 
-- Full support for ECMAScript 5.1 - http://www.ecma-international.org/ecma-262/5.1/
-- .NET Portable Class Library - http://msdn.microsoft.com/en-us/library/gg597391(v=vs.110).aspx
-- .NET Interoperability 
+- Run JavaScript inside your .NET application in a safe sand-boxed environment
+- Expose native .NET objects and functions to your JavaScript code (get database query results as JSON, call .NET methods, etc.)
+- Support scripting in your .NET application, allowing users to customize your application using JavaScript (like Unity games) 
 
-> ECMAScript 6.0 currently being implemeted, see https://github.com/sebastienros/jint/issues/343
+Some users of Jint include 
+[RavenDB](https://github.com/ravendb/ravendb), 
+[EventStore](https://github.com/EventStore/EventStore), 
+[OrchardCore](https://github.com/OrchardCMS/OrchardCore), 
+[ELSA Workflows](https://github.com/elsa-workflows/elsa-core),
+[docfx](https://github.com/dotnet/docfx), 
+[JavaScript Engine Switcher](https://github.com/Taritsyn/JavaScriptEngineSwitcher),
+and many more.
 
-# Discussion
+## Supported features
+
+#### ECMAScript 2015 (ES6)
+
+- ✔ ArrayBuffer
+- ✔ Arrow function expression
+- ✔ Binary and octal literals
+- ✔ Class support
+- ✔ DataView
+- ✔ Destructuring
+- ✔ Default, rest and spread
+- ✔ Enhanced object literals
+- ✔ `for...of`
+- ❌ Generators
+- ✔ Template strings
+- ✔ Lexical scoping of variables (let and const)
+- ✔ Map and Set
+- ✔ Modules and module loaders
+- ✔ Promises (Experimental, API is unstable)
+- ✔ Reflect
+- ✔ Proxies
+- ✔ Symbols
+- ❌ Tail calls
+- ✔ Typed arrays
+- ✔ Unicode
+- ✔ Weakmap and Weakset
+
+#### ECMAScript 2016
+
+- ✔ `Array.prototype.includes`
+- ✔ `await`, `async`
+- ✔ Block-scoping of variables and functions
+- ✔ Exponentiation operator `**`
+- ✔ Destructuring patterns (of variables)
+
+####  ECMAScript 2017
+
+- ✔ `Object.values`, `Object.entries` and `Object.getOwnPropertyDescriptors`
+
+#### ECMAScript 2018
+
+- ✔ `Promise.prototype.finally`
+- ✔ RegExp named capture groups
+- ✔ Rest/spread operators for object literals (`...identifier`)
+- ✔ SharedArrayBuffer
+
+#### ECMAScript 2019
+
+- ✔ `Array.prototype.flat`, `Array.prototype.flatMap`
+- ✔ `String.prototype.trimStart`, `String.prototype.trimEnd`
+- ✔ `Object.fromEntries`
+- ✔ `Symbol.description`
+- ✔ Optional catch binding
+
+#### ECMAScript 2020
+
+- ✔ `BigInt`
+- ✔ `export * as ns from`
+- ✔ `for-in` enhancements
+- ✔ `globalThis` object
+- ✔ `import`
+- ✔ `import.meta`
+- ✔ Nullish coalescing operator (`??`)
+- ✔ Optional chaining
+- ✔ `Promise.allSettled`
+- ✔ `String.prototype.matchAll`
+
+#### ECMAScript 2021
+
+- ✔ Logical Assignment Operators (`&&=` `||=` `??=`)
+- ✔ Numeric Separators (`1_000`)
+- ✔ `AggregateError`
+- ✔ `Promise.any` 
+- ✔ `String.prototype.replaceAll`
+- ✔ `WeakRef` 
+- ✔ `FinalizationRegistry`
+
+#### ECMAScript 2022
+
+- ✔ Class Fields
+- ✔ RegExp Match Indices
+- ✔ Top-level await
+- ✔ Ergonomic brand checks for Private Fields
+- ✔ `.at()`
+- ✔ Accessible `Object.prototype.hasOwnProperty` (`Object.hasOwn`)
+- ✔ Class Static Block
+- ✔ Error Cause
+
+#### ECMAScript 2023
+
+- ✔ Array find from last
+- ✔ Change Array by copy
+- ✔ Hashbang Grammar
+- ✔ Symbols as WeakMap keys
+
+#### ECMAScript Stage 3 (no version yet)
+
+- ✔ `ArrayBuffer.prototype.transfer`
+- ✔ Array Grouping - `Object.groupBy` and `Map.groupBy`
+- ✔ Import attributes
+- ✔ JSON modules
+- ✔ `Promise.withResolvers`
+- ✔ Resizable and growable ArrayBuffers
+- ✔ Set methods (`intersection`, `union`, `difference`, `symmetricDifference`, `isSubsetOf`, `isSupersetOf`, `isDisjointFrom`)
+- ✔ ShadowRealm
+
+#### Other
+
+- Further refined .NET CLR interop capabilities
+- Constraints for execution (recursion, memory usage, duration)
+
+> Follow new features as they are being implemented, see https://github.com/sebastienros/jint/issues/343
+
+## Performance
+
+- Because Jint neither generates any .NET bytecode nor uses the DLR it runs relatively small scripts really fast
+- If you repeatedly run the same script, you should cache the `Script` or `Module` instance produced by Esprima and feed it to Jint instead of the content string
+- You should prefer running engine in strict mode, it improves performance
+
+You can check out [the engine comparison results](Jint.Benchmark), bear in mind that every use case is different and benchmarks might not reflect your real-world usage.
+
+## Discussion
 
 Join the chat on [Gitter](https://gitter.im/sebastienros/jint) or post your questions with the `jint` tag on [stackoverflow](http://stackoverflow.com/questions/tagged/jint).
 
-# Examples
+## Video
 
-This example defines a new value named `log` pointing to `Console.WriteLine`, then executes 
+Here is a short video of how Jint works and some sample usage
+
+https://docs.microsoft.com/shows/code-conversations/sebastien-ros-on-jint-javascript-interpreter-net
+
+## Thread-safety
+
+Engine instances are not thread-safe and they should not accessed from multiple threads simultaneously. 
+
+## Examples
+
+This example defines a new value named `log` pointing to `Console.WriteLine`, then runs
 a script calling `log('Hello World!')`. 
+
 ```c#
-    var engine = new Engine()
-        .SetValue("log", new Action<object>(Console.WriteLine))
-        ;
+var engine = new Engine()
+    .SetValue("log", new Action<object>(Console.WriteLine));
     
-    engine.Execute(@"
-      function hello() { 
+engine.Execute(@"
+    function hello() { 
         log('Hello World');
-      };
-      
-      hello();
-    ");
+    };
+ 
+    hello();
+");
 ```
-Here, the variable `x` is set to `3` and `x * x` is executed in JavaScript. The result is returned to .NET directly, in this case as a `double` value `9`. 
+
+Here, the variable `x` is set to `3` and `x * x` is evaluated in JavaScript. The result is returned to .NET directly, in this case as a `double` value `9`. 
 ```c#
-    var square = new Engine()
-        .SetValue("x", 3) // define a new variable
-        .Execute("x * x") // execute a statement
-        .GetCompletionValue() // get the latest statement completion value
-        .ToObject() // converts the value to .NET
-        ;
+var square = new Engine()
+    .SetValue("x", 3) // define a new variable
+    .Evaluate("x * x") // evaluate a statement
+    .ToObject(); // converts the value to .NET
 ```
+
 You can also directly pass POCOs or anonymous objects and use them from JavaScript. In this example for instance a new `Person` instance is manipulated from JavaScript. 
 ```c#
-    var p = new Person {
-        Name = "Mickey Mouse"
-    };
+var p = new Person {
+    Name = "Mickey Mouse"
+};
 
-    var engine = new Engine()
-        .SetValue("p", p)
-        .Execute("p.Name = 'Minnie'")
-        ;
-    Assert.AreEqual("Minnie", p.Name);
+var engine = new Engine()
+    .SetValue("p", p)
+    .Execute("p.Name = 'Minnie'");
+
+Assert.AreEqual("Minnie", p.Name);
 ```
+
 You can invoke JavaScript function reference
 ```c#
-    var add = new Engine()
-        .Execute("function add(a, b) { return a + b; }")
-        .GetValue("add")
-        ;
+var add = new Engine()
+    .Execute("function add(a, b) { return a + b; }")
+    .GetValue("add");
 
-    add.Invoke(1, 2); // -> 3
+add.Invoke(1, 2); // -> 3
 ```
 or directly by name 
 ```c#
-    var engine = new Engine()
-        .Execute("function add(a, b) { return a + b; }")
-        ;
+var engine = new Engine()
+   .Execute("function add(a, b) { return a + b; }");
 
-    engine.Invoke("add", 1, 2); // -> 3
+engine.Invoke("add", 1, 2); // -> 3
 ```
 ## Accessing .NET assemblies and classes
 
 You can allow an engine to access any .NET class by configuring the engine instance like this:
 ```c#
-    var engine = new Engine(cfg => cfg.AllowClr());
+var engine = new Engine(cfg => cfg.AllowClr());
 ```
+
 Then you have access to the `System` namespace as a global value. Here is how it's used in the context on the command line utility:
 ```javascript
-    jint> var file = new System.IO.StreamWriter('log.txt');
-    jint> file.WriteLine('Hello World !');
-    jint> file.Dispose();
+jint> var file = new System.IO.StreamWriter('log.txt');
+jint> file.WriteLine('Hello World !');
+jint> file.Dispose();
 ```
 And even create shortcuts to common .NET methods
 ```javascript
-    jint> var log = System.Console.WriteLine;
-    jint> log('Hello World !');
-    => "Hello World !"
+jint> var log = System.Console.WriteLine;
+jint> log('Hello World !');
+=> "Hello World !"
 ```
+
 When allowing the CLR, you can optionally pass custom assemblies to load types from. 
 ```c#
-    var engine = new Engine(cfg => cfg
-        .AllowClr(typeof(Bar).Assembly)
-    );
+var engine = new Engine(cfg => cfg
+    .AllowClr(typeof(Bar).Assembly)
+);
 ```
+
 and then to assign local namespaces the same way `System` does it for you, use `importNamespace`
 ```javascript
-    jint> var Foo = importNamespace('Foo');
-    jint> var bar = new Foo.Bar();
-    jint> log(bar.ToString());
+jint> var Foo = importNamespace('Foo');
+jint> var bar = new Foo.Bar();
+jint> log(bar.ToString());
 ```    
+
 adding a specific CLR type reference can be done like this
 ```csharp
-engine.SetValue("TheType", TypeReference.CreateTypeReference(engine, typeof(TheType)))
+engine.SetValue("TheType", TypeReference.CreateTypeReference<TheType>(engine));
 ```
+
 and used this way
 ```javascript
-    jint> var o = new TheType();
+jint> var o = new TheType();
 ```
+
 Generic types are also supported. Here is how to declare, instantiate and use a `List<string>`:
 ```javascript
-    jint> var ListOfString = System.Collections.Generic.List(System.String);
-    jint> var list = new ListOfString();
-    jint> list.Add('foo');
-    jint> list.Add(1); // automatically converted to String
-    jint> list.Count; // 2
+jint> var ListOfString = System.Collections.Generic.List(System.String);
+jint> var list = new ListOfString();
+jint> list.Add('foo');
+jint> list.Add(1); // automatically converted to String
+jint> list.Count; // 2
 ```
 
 ## Internationalization
@@ -127,24 +271,24 @@ You can enforce what Time Zone or Culture the engine should use when locale Java
 
 This example forces the Time Zone to Pacific Standard Time.
 ```c#
-    var PST = TimeZoneInfo.FindSystemTimeZoneById("Pacific Standard Time");
-    var engine = new Engine(cfg => cfg.LocalTimeZone(PST));
+var PST = TimeZoneInfo.FindSystemTimeZoneById("Pacific Standard Time");
+var engine = new Engine(cfg => cfg.LocalTimeZone(PST));
     
-    engine.Execute("new Date().toString()"); // Wed Dec 31 1969 16:00:00 GMT-08:00
+engine.Execute("new Date().toString()"); // Wed Dec 31 1969 16:00:00 GMT-08:00
 ```
 
 This example is using French as the default culture.
 ```c#
-    var FR = CultureInfo.GetCultureInfo("fr-FR");
-    var engine = new Engine(cfg => cfg.Culture(FR));
+var FR = CultureInfo.GetCultureInfo("fr-FR");
+var engine = new Engine(cfg => cfg.Culture(FR));
     
-    engine.Execute("new Number(1.23).toString()"); // 1.23
-    engine.Execute("new Number(1.23).toLocaleString()"); // 1,23
+engine.Execute("new Number(1.23).toString()"); // 1.23
+engine.Execute("new Number(1.23).toLocaleString()"); // 1,23
 ```
 
-## Constraints 
+## Execution Constraints 
 
-Constraints are used during script execution to ensure that requirements around resource consumption are met, for example:
+Execution constraints are used during script execution to ensure that requirements around resource consumption are met, for example:
 
 * Scripts should not use more than X memory.
 * Scripts should only run for a maximum amount of time.
@@ -168,29 +312,29 @@ var engine = new Engine(options => {
 }
 ```
 
-You can also write a custom constraint by implementing the `IConstraint` interface:
+You can also write a custom constraint by deriving from the `Constraint` base class:
 
 ```c#
-public interface IConstraint
+public abstract class Constraint
 {
-    /// Called before a script is executed and useful when you us an engine object for multiple executions.
-    void Reset();
+    /// Called before script is run and useful when you use an engine object for multiple executions.
+    public abstract void Reset();
 
-    // Called before each statement to check if your requirements are met.
-    void Check();
+    // Called before each statement to check if your requirements are met; if not - throws an exception.
+    public abstract void Check();
 }
 ```
 
 For example we can write a constraint that stops scripts when the CPU usage gets too high:
 
 ```c#
-class MyCPUConstraint : IConstraint
+class MyCPUConstraint : Constraint
 {
-    public void Reset()
+    public override void Reset()
     {
     }
 
-    public void Check()
+    public override void Check()
     {
         var cpuUsage = GetCPUUsage();
 
@@ -207,15 +351,15 @@ var engine = new Engine(options =>
 });
 ```
 
-When you reuse the engine you want to use cancellation tokens you have to reset the token before each call of `Execute`:
+When you reuse the engine and want to use cancellation tokens you have to reset the token before each call of `Execute`:
 
 ```c#
-var constraint = new CancellationConstraint();
-
 var engine = new Engine(options =>
 {
-    options.Constraint(constraint);
+    options.CancellationToken(new CancellationToken(true));
 });
+
+var constraint = engine.Constraints.Find<CancellationConstraint>();
 
 for (var i = 0; i < 10; i++) 
 {
@@ -229,44 +373,59 @@ for (var i = 0; i < 10; i++)
 }
 ```
 
-## Implemented features:
+## Using Modules
 
-### ECMAScript 5.1
+You can use modules to `import` and `export` variables from multiple script files:
 
-- Complete implementation
-  - ECMAScript 5.1 test suite (http://test262.ecmascript.org/) 
+```c#
+var engine = new Engine(options =>
+{
+    options.EnableModules(@"C:\Scripts");
+})
 
-### ECMAScript 6.0
+var ns = engine.Modules.Import("./my-module.js");
 
-ES6 features which are being implemented:
-- [x] [arrows](https://github.com/lukehoban/es6features/blob/master/README.md#arrows)
-- [ ] [classes](https://github.com/lukehoban/es6features/blob/master/README.md#classes)
-- [x] [enhanced object literals](https://github.com/lukehoban/es6features/blob/master/README.md#enhanced-object-literals)
-- [x] [template strings](https://github.com/lukehoban/es6features/blob/master/README.md#template-strings)
-- [x] [destructuring](https://github.com/lukehoban/es6features/blob/master/README.md#destructuring)
-- [x] [default + rest + spread](https://github.com/lukehoban/es6features/blob/master/README.md#default--rest--spread)
-- [x] [let + const](https://github.com/lukehoban/es6features/blob/master/README.md#let--const)
-- [x] [iterators + for..of](https://github.com/lukehoban/es6features/blob/master/README.md#iterators--forof)
-- [ ] [generators](https://github.com/lukehoban/es6features/blob/master/README.md#generators)
-- [ ] [unicode](https://github.com/lukehoban/es6features/blob/master/README.md#unicode)
-- [ ] [modules](https://github.com/lukehoban/es6features/blob/master/README.md#modules)
-- [ ] [module loaders](https://github.com/lukehoban/es6features/blob/master/README.md#module-loaders)
-- [x] [map + set](https://github.com/lukehoban/es6features/blob/master/README.md#map--set--weakmap--weakset)
-- [ ] [weakmap + weakset](https://github.com/lukehoban/es6features/blob/master/README.md#map--set--weakmap--weakset)
-- [x] [proxies](https://github.com/lukehoban/es6features/blob/master/README.md#proxies)
-- [x] [symbols](https://github.com/lukehoban/es6features/blob/master/README.md#symbols)
-- [ ] [subclassable built-ins](https://github.com/lukehoban/es6features/blob/master/README.md#subclassable-built-ins)
-- [ ] [promises](https://github.com/lukehoban/es6features/blob/master/README.md#promises)
-- [x] [math APIs](https://github.com/lukehoban/es6features/blob/master/README.md#math--number--string--array--object-apis)
-- [x] [number APIs](https://github.com/lukehoban/es6features/blob/master/README.md#math--number--string--array--object-apis)
-- [x] [string APIs](https://github.com/lukehoban/es6features/blob/master/README.md#math--number--string--array--object-apis)
-- [x] [array APIs](https://github.com/lukehoban/es6features/blob/master/README.md#math--number--string--array--object-apis)
-- [x] [object APIs](https://github.com/lukehoban/es6features/blob/master/README.md#math--number--string--array--object-apis)
-- [x] [binary and octal literals](https://github.com/lukehoban/es6features/blob/master/README.md#binary-and-octal-literals)
-- [x] [reflect api](https://github.com/lukehoban/es6features/blob/master/README.md#reflect-api)
-- [ ] [tail calls](https://github.com/lukehoban/es6features/blob/master/README.md#tail-calls)
+var value = ns.Get("value").AsString();
+```
 
-### .NET Interoperability
+By default, the module resolution algorithm will be restricted to the base path specified in `EnableModules`, and there is no package support. However you can provide your own packages in two ways.
+
+Defining modules using JavaScript source code:
+
+```c#
+engine.Modules.Add("user", "export const name = 'John';");
+
+var ns = engine.Modules.Import("user");
+
+var name = ns.Get("name").AsString();
+```
+
+Defining modules using the module builder, which allows you to export CLR classes and values from .NET:
+
+```c#
+// Create the module 'lib' with the class MyClass and the variable version
+engine.Modules.Add("lib", builder => builder
+    .ExportType<MyClass>()
+    .ExportValue("version", 15)
+);
+
+// Create a user-defined module and do something with 'lib'
+engine.Modules.Add("custom", @"
+    import { MyClass, version } from 'lib';
+    const x = new MyClass();
+    export const result as x.doSomething();
+");
+
+// Import the user-defined module; this will execute the import chain
+var ns = engine.Modules.Import("custom");
+
+// The result contains "live" bindings to the module
+var id = ns.Get("result").AsInteger();
+```
+
+Note that you don't need to `EnableModules` if you only use modules created using `Engine.Modules.Add`.
+
+## .NET Interoperability
 
 - Manipulate CLR objects from JavaScript, including:
   - Single values
@@ -285,8 +444,9 @@ ES6 features which are being implemented:
   - boolean -> bool
   - Regex -> RegExp
   - Function -> Delegate
+- Extensions methods
 
-### Security
+## Security
 
 The following features provide you with a secure, sand-boxed environment to run user scripts.
 
@@ -296,12 +456,8 @@ The following features provide you with a secure, sand-boxed environment to run 
 - Limit depth of calls to prevent deep recursion calls.
 - Define a timeout, to prevent scripts from taking too long to finish.
 
-Continuous Integration kindly provided by  [AppVeyor](https://www.appveyor.com)
+## Branches and releases
 
-### Branches and releases
-
-- The recommended branch is __dev__, any PR should target this branch
-- The __dev__ branch is automatically built and published on [Myget](https://www.myget.org/feed/Packages/jint)
-- The __dev__ branch is occasionally merged to __master__ and published on [NuGet](https://www.nuget.org/packages/jint)
-- The 3.x releases have more features (from es6) and is faster than the 2.x ones. They run the same test suite so they are as reliable. For instance [RavenDB](https://github.com/ravendb/ravendb) is using the 3.x version.
-- The 3.x versions are marked as _beta_ as they might get breaking changes while es6 features are added. 
+- The recommended branch is __main__, any PR should target this branch
+- The __main__ branch is automatically built and published on [MyGet](https://www.myget.org/feed/Packages/jint). Add this feed to your NuGet sources to use it: https://www.myget.org/F/jint/api/v3/index.json
+- The __main__ branch is occasionally published on [NuGet](https://www.nuget.org/packages/jint)

@@ -1,31 +1,33 @@
-﻿using Jint.Native;
+using Jint.Native;
 using Jint.Runtime.Environments;
 using Jint.Runtime.Interop;
+using Environment = Jint.Runtime.Environments.Environment;
 
 namespace Jint.Runtime.Descriptors.Specialized
 {
     internal sealed class ClrAccessDescriptor : PropertyDescriptor
     {
-        private readonly DeclarativeEnvironmentRecord _env;
+        private readonly DeclarativeEnvironment _env;
         private readonly Engine _engine;
-        private readonly EnvironmentRecord.BindingName _name;
+        private readonly Environment.BindingName _name;
 
-        private GetterFunctionInstance _get;
-        private SetterFunctionInstance _set;
+        private GetterFunction? _get;
+        private SetterFunction? _set;
 
         public ClrAccessDescriptor(
-            DeclarativeEnvironmentRecord env,
+            DeclarativeEnvironment env,
             Engine engine,
             string name)
             : base(value: null, PropertyFlag.Configurable)
         {
+            _flags |= PropertyFlag.NonData;
             _env = env;
             _engine = engine;
-            _name = new EnvironmentRecord.BindingName(name);
+            _name = new Environment.BindingName(name);
         }
 
-        public override JsValue Get => _get ??= new GetterFunctionInstance(_engine, DoGet);
-        public override JsValue Set => _set ??= new SetterFunctionInstance(_engine, DoSet);
+        public override JsValue Get => _get ??= new GetterFunction(_engine, DoGet);
+        public override JsValue Set => _set ??= new SetterFunction(_engine, DoSet);
 
         private JsValue DoGet(JsValue n)
         {
@@ -36,7 +38,7 @@ namespace Jint.Runtime.Descriptors.Specialized
 
         private void DoSet(JsValue n, JsValue o)
         {
-            _env.SetMutableBinding(_name.Key.Name, o, true);
+            _env.SetMutableBinding(_name.Key, o, true);
         }
     }
 }

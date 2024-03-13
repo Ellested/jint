@@ -2,18 +2,18 @@ using Esprima.Ast;
 
 namespace Jint.Runtime.Interpreter.Statements
 {
-    internal sealed class JintScript : JintStatement<Script>
+    internal sealed class JintScript
     {
         private readonly JintStatementList _list;
 
-        public JintScript(Engine engine, Script script) : base(engine, script)
+        public JintScript(Script script)
         {
-            _list = new JintStatementList(_engine, null, _statement.Body);
+            _list = new JintStatementList(script);
         }
 
-        protected override Completion ExecuteInternal()
+        public Completion Execute(EvaluationContext context)
         {
-            return _list.Execute();
+            return _list.Execute(context);
         }
     }
 }

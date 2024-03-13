@@ -1,4 +1,6 @@
-﻿// Copyright 2010 the V8 project authors. All rights reserved.
+#nullable disable
+
+// Copyright 2010 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -29,14 +31,15 @@
 // The original revision was 67d1049b0bf9 from the mozilla-central tree.
 
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace Jint.Native.Number.Dtoa
 {
-    internal class CachedPowers
+    internal static class CachedPowers
     {
         private const double Kd1Log210 = 0.30102999566398114; //  1 / lg(10)
 
-        private class CachedPower
+        private sealed class CachedPower
         {
             internal readonly ulong Significand;
             internal readonly short BinaryExponent;
@@ -50,6 +53,7 @@ namespace Jint.Native.Number.Dtoa
             }
         }
 
+        [StructLayout(LayoutKind.Auto)]
         internal readonly struct GetCachedPowerResult
         {
             public GetCachedPowerResult(short decimalExponent, DiyFp cMk)

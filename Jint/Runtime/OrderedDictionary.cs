@@ -1,9 +1,12 @@
+#pragma warning disable CA1863 // Cache a 'CompositeFormat' for repeated use in this formatting operation
+
+#nullable disable
+
 // based on https://github.com/jehugaleahsa/truncon.collections.OrderedDictionary
 // https://github.com/jehugaleahsa/truncon.collections.OrderedDictionary/blob/master/UNLICENSE.txt
 
 
 using System.Collections;
-using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -415,8 +418,7 @@ namespace Jint.Runtime
             /// <exception cref="System.ArgumentNullException">The dictionary is null.</exception>
             public KeyCollection(OrderedDictionary<TKey, TValue> dictionary)
             {
-                parent = dictionary
-                         ?? ExceptionHelper.ThrowArgumentNullException<OrderedDictionary<TKey, TValue>>(nameof(dictionary));
+                parent = dictionary;
             }
 
             /// <summary>
@@ -500,8 +502,7 @@ namespace Jint.Runtime
             /// <exception cref="System.ArgumentNullException">The dictionary is null.</exception>
             public ValueCollection(OrderedDictionary<TKey, TValue> dictionary)
             {
-                parent = dictionary
-                         ?? ExceptionHelper.ThrowArgumentNullException<OrderedDictionary<TKey, TValue>>(nameof(dictionary));
+                parent = dictionary;
             }
 
             /// <summary>
@@ -514,14 +515,9 @@ namespace Jint.Runtime
             /// <exception cref="System.ArgumentException">The array, starting at the given index, is not large enough to contain all the values.</exception>
             public void CopyTo(TValue[] array, int arrayIndex)
             {
-                if (array == null)
-                {
-                    ExceptionHelper.ThrowArgumentNullException(nameof(array));
-                    return;
-                }
                 if (arrayIndex < 0)
                 {
-                    ExceptionHelper.ThrowArgumentOutOfRangeException(nameof(arrayIndex), string.Format(TooSmall, 0));
+                    ExceptionHelper.ThrowArgumentOutOfRangeException(nameof(arrayIndex), string.Format(CultureInfo.InvariantCulture, TooSmall, 0));
                 }
                 if (parent.dictionary.Count > array.Length - arrayIndex)
                 {

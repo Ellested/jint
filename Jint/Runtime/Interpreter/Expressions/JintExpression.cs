@@ -1,7 +1,7 @@
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using Esprima.Ast;
 using Jint.Native;
-using Jint.Native.Array;
 using Jint.Native.Iterator;
 using Jint.Native.Number;
 
@@ -9,15 +9,10 @@ namespace Jint.Runtime.Interpreter.Expressions
 {
     internal abstract class JintExpression
     {
-        // require sub-classes to set to false explicitly to skip virtual call
-        protected bool _initialized = true;
-
-        protected readonly Engine _engine;
         protected internal readonly Expression _expression;
 
-        protected JintExpression(Engine engine, Expression expression)
+        protected JintExpression(Expression expression)
         {
-            _engine = engine;
             _expression = expression;
         }
 
@@ -25,72 +20,156 @@ namespace Jint.Runtime.Interpreter.Expressions
         /// Resolves the underlying value for this expression.
         /// By default uses the Engine for resolving.
         /// </summary>
+        /// <param name="context"></param>
         /// <seealso cref="JintLiteralExpression"/>
-        public virtual JsValue GetValue()
+        public virtual JsValue GetValue(EvaluationContext context)
         {
-            return _engine.GetValue(Evaluate(), true);
+            var result = Evaluate(context);
+            if (result is not Reference reference)
+            {
+                return (JsValue) result;
+            }
+
+            return context.Engine.GetValue(reference, returnReferenceToPool: true);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining | (MethodImplOptions) 512)]
+        public object Evaluate(EvaluationContext context)
+        {
+            var oldSyntaxElement = context.LastSyntaxElement;
+            context.PrepareFor(_expression);
+
+            var result = EvaluateInternal(context);
+
+            context.LastSyntaxElement = oldSyntaxElement;
+
+            return result;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public object Evaluate()
+        internal object EvaluateWithoutNodeTracking(EvaluationContext context)
         {
-            _engine._lastSyntaxNode = _expression;
-            if (!_initialized)
-            {
-                Initialize();
-                _initialized = true;
-            }
-            return EvaluateInternal();
+            return EvaluateInternal(context);
         }
+
+        protected abstract object EvaluateInternal(EvaluationContext context);
 
         /// <summary>
-        /// Opportunity to build one-time structures and caching based on lexical context.
+        /// If we'd get Esprima source, we would just refer to it, but this makes error messages easier to decipher.
         /// </summary>
-        protected virtual void Initialize()
+        internal string SourceText => ToString(_expression) ?? "*unknown*";
+
+        internal static string? ToString(Expression expression)
         {
+            while (true)
+            {
+                if (expression is Literal literal)
+                {
+                    return EsprimaExtensions.LiteralKeyToString(literal);
+                }
+
+                if (expression is Identifier identifier)
+                {
+                    return identifier.Name;
+                }
+
+                if (expression is MemberExpression memberExpression)
+                {
+                    return ToString(memberExpression.Object) + "." + ToString(memberExpression.Property);
+                }
+
+                if (expression is CallExpression callExpression)
+                {
+                    expression = callExpression.Callee;
+                    continue;
+                }
+
+                return null;
+            }
         }
 
-        protected abstract object EvaluateInternal();
-
-        protected internal static JintExpression Build(Engine engine, Expression expression)
+        protected internal static JintExpression Build(Expression expression)
         {
-            return expression.Type switch
+            if (expression.AssociatedData is JintExpression preparedExpression)
             {
-                Nodes.AssignmentExpression => JintAssignmentExpression.Build(engine, (AssignmentExpression) expression),
-                Nodes.ArrayExpression => new JintArrayExpression(engine, (ArrayExpression) expression),
-                Nodes.ArrowFunctionExpression => new JintArrowFunctionExpression(engine, (IFunction) expression),
-                Nodes.BinaryExpression => JintBinaryExpression.Build(engine, (BinaryExpression) expression),
-                Nodes.CallExpression => new JintCallExpression(engine, (CallExpression) expression),
-                Nodes.ConditionalExpression => new JintConditionalExpression(engine, (ConditionalExpression) expression),
-                Nodes.FunctionExpression => new JintFunctionExpression(engine, (IFunction) expression),
-                Nodes.Identifier => new JintIdentifierExpression(engine, (Identifier) expression),
-                Nodes.Literal => JintLiteralExpression.Build(engine, (Literal) expression),
+                return preparedExpression;
+            }
+
+            var result = expression.Type switch
+            {
+                Nodes.AssignmentExpression => JintAssignmentExpression.Build((AssignmentExpression) expression),
+                Nodes.ArrayExpression => JintArrayExpression.Build((ArrayExpression) expression),
+                Nodes.ArrowFunctionExpression => new JintArrowFunctionExpression((ArrowFunctionExpression) expression),
+                Nodes.BinaryExpression => JintBinaryExpression.Build((BinaryExpression) expression),
+                Nodes.CallExpression => new JintCallExpression((CallExpression) expression),
+                Nodes.ConditionalExpression => new JintConditionalExpression((ConditionalExpression) expression),
+                Nodes.FunctionExpression => new JintFunctionExpression((FunctionExpression) expression),
+                Nodes.Identifier => new JintIdentifierExpression((Identifier) expression),
+                Nodes.PrivateIdentifier => new JintPrivateIdentifierExpression((PrivateIdentifier) expression),
+                Nodes.Literal => JintLiteralExpression.Build((Literal) expression),
                 Nodes.LogicalExpression => ((BinaryExpression) expression).Operator switch
                 {
-                    BinaryOperator.LogicalAnd => new JintLogicalAndExpression(engine, (BinaryExpression) expression),
-                    BinaryOperator.LogicalOr => new JintLogicalOrExpression(engine, (BinaryExpression) expression),
-                    _ => ExceptionHelper.ThrowArgumentOutOfRangeException<JintExpression>()
+                    BinaryOperator.LogicalAnd => new JintLogicalAndExpression((BinaryExpression) expression),
+                    BinaryOperator.LogicalOr => new JintLogicalOrExpression((BinaryExpression) expression),
+                    BinaryOperator.NullishCoalescing => new NullishCoalescingExpression((BinaryExpression) expression),
+                    _ => null
                 },
-                Nodes.MemberExpression => new JintMemberExpression(engine, (MemberExpression) expression),
-                Nodes.NewExpression => new JintNewExpression(engine, (NewExpression) expression),
-                Nodes.ObjectExpression => new JintObjectExpression(engine, (ObjectExpression) expression),
-                Nodes.SequenceExpression => new JintSequenceExpression(engine, (SequenceExpression) expression),
-                Nodes.ThisExpression => new JintThisExpression(engine, (ThisExpression) expression),
-                Nodes.UpdateExpression => new JintUpdateExpression(engine, (UpdateExpression) expression),
-                Nodes.UnaryExpression => JintUnaryExpression.Build(engine, (UnaryExpression) expression),
-                Nodes.SpreadElement => new JintSpreadExpression(engine, (SpreadElement) expression),
-                Nodes.TemplateLiteral => new JintTemplateLiteralExpression(engine, (TemplateLiteral) expression),
-                Nodes.TaggedTemplateExpression => new JintTaggedTemplateExpression(engine, (TaggedTemplateExpression) expression),
-                _ => ExceptionHelper.ThrowArgumentOutOfRangeException<JintExpression>(nameof(expression), $"unsupported expression type '{expression.Type}'")
+                Nodes.MemberExpression => new JintMemberExpression((MemberExpression) expression),
+                Nodes.NewExpression => new JintNewExpression((NewExpression) expression),
+                Nodes.ObjectExpression => JintObjectExpression.Build((ObjectExpression) expression),
+                Nodes.SequenceExpression => new JintSequenceExpression((SequenceExpression) expression),
+                Nodes.ThisExpression => new JintThisExpression((ThisExpression) expression),
+                Nodes.UpdateExpression => new JintUpdateExpression((UpdateExpression) expression),
+                Nodes.UnaryExpression => JintUnaryExpression.Build((UnaryExpression) expression),
+                Nodes.SpreadElement => new JintSpreadExpression((SpreadElement) expression),
+                Nodes.TemplateLiteral => new JintTemplateLiteralExpression((TemplateLiteral) expression),
+                Nodes.TaggedTemplateExpression => new JintTaggedTemplateExpression((TaggedTemplateExpression) expression),
+                Nodes.ClassExpression => new JintClassExpression((ClassExpression) expression),
+                Nodes.ImportExpression => new JintImportExpression((ImportExpression) expression),
+                Nodes.Super => new JintSuperExpression((Super) expression),
+                Nodes.MetaProperty => new JintMetaPropertyExpression((MetaProperty) expression),
+                Nodes.ChainExpression => ((ChainExpression) expression).Expression.Type == Nodes.CallExpression
+                    ? new JintCallExpression((CallExpression) ((ChainExpression) expression).Expression)
+                    : new JintMemberExpression((MemberExpression) ((ChainExpression) expression).Expression),
+                Nodes.AwaitExpression => new JintAwaitExpression((AwaitExpression) expression),
+                _ =>  null
             };
+
+            if (result is null)
+            {
+                ExceptionHelper.ThrowArgumentOutOfRangeException(nameof(expression), $"unsupported expression type '{expression.Type}'");
+            }
+
+            return result;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected static JsValue Divide(JsValue lval, JsValue rval)
+        protected static JsValue Divide(EvaluationContext context, JsValue left, JsValue right)
         {
-            return AreIntegerOperands(lval, rval)
-                ? DivideInteger(lval, rval)
-                : DivideComplex(lval, rval);
+            JsValue result;
+            if (AreIntegerOperands(left, right))
+            {
+                result = DivideInteger(left, right);
+            }
+            else if (JintBinaryExpression.AreNonBigIntOperands(left, right))
+            {
+                result = DivideComplex(left, right);
+            }
+            else
+            {
+                JintBinaryExpression.AssertValidBigIntArithmeticOperands(left, right);
+                var x = TypeConverter.ToBigInt(left);
+                var y = TypeConverter.ToBigInt(right);
+
+                if (y == 0)
+                {
+                    ExceptionHelper.ThrowRangeError(context.Engine.Realm, "Division by zero");
+                }
+
+                result = JsBigInt.Create(x / y);
+            }
+
+            return result;
         }
 
         private static JsValue DivideInteger(JsValue lval, JsValue rval)
@@ -108,9 +187,9 @@ namespace Jint.Runtime.Interpreter.Expressions
                 return lN > 0 ? double.PositiveInfinity : double.NegativeInfinity;
             }
 
-            if (lN % rN == 0)
+            if (lN % rN == 0 && (lN != 0 || rN > 0))
             {
-                return lN / rN;
+                return JsNumber.Create(lN / rN);
             }
 
             return (double) lN / rN;
@@ -120,7 +199,7 @@ namespace Jint.Runtime.Interpreter.Expressions
         {
             if (lval.IsUndefined() || rval.IsUndefined())
             {
-                return Undefined.Instance;
+                return JsValue.Undefined;
             }
             else
             {
@@ -167,84 +246,40 @@ namespace Jint.Runtime.Interpreter.Expressions
 
         }
 
-        protected static bool Equal(JsValue x, JsValue y)
-        {
-            return x.Type == y.Type
-                ? JintBinaryExpression.StrictlyEqual(x, y)
-                : EqualUnlikely(x, y);
-        }
-
-        private static bool EqualUnlikely(JsValue x, JsValue y)
-        {
-            if (x._type == InternalTypes.Null && y._type == InternalTypes.Undefined)
-            {
-                return true;
-            }
-
-            if (x._type == InternalTypes.Undefined && y._type == InternalTypes.Null)
-            {
-                return true;
-            }
-
-            if (x.IsNumber() && y.IsString())
-            {
-                return Equal(x, TypeConverter.ToNumber(y));
-            }
-
-            if (x.IsString() && y.IsNumber())
-            {
-                return Equal(TypeConverter.ToNumber(x), y);
-            }
-
-            if (x.IsBoolean())
-            {
-                return Equal(TypeConverter.ToNumber(x), y);
-            }
-
-            if (y.IsBoolean())
-            {
-                return Equal(x, TypeConverter.ToNumber(y));
-            }
-
-            const InternalTypes stringOrNumber = InternalTypes.String | InternalTypes.Integer | InternalTypes.Number;
-
-            if (y.IsObject() && (x._type & stringOrNumber) != 0)
-            {
-                return Equal(x, TypeConverter.ToPrimitive(y));
-            }
-
-            if (x.IsObject() && ((y._type & stringOrNumber) != 0))
-            {
-                return Equal(TypeConverter.ToPrimitive(x), y);
-            }
-
-            return false;
-        }
-
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         protected static JsValue Compare(JsValue x, JsValue y, bool leftFirst = true) =>
-            x._type == y._type && x._type == InternalTypes.Integer
-                ? CompareInteger(x, y, leftFirst)
+            x.IsNumber() && y.IsNumber()
+                ? CompareNumber(x, y, leftFirst)
                 : CompareComplex(x, y, leftFirst);
 
-        private static JsValue CompareInteger(JsValue x, JsValue y, bool leftFirst)
+        private static JsValue CompareNumber(JsValue x, JsValue y, bool leftFirst)
         {
-            int nx, ny;
+            double nx, ny;
             if (leftFirst)
             {
-                nx = x.AsInteger();
-                ny = y.AsInteger();
+                nx = x.AsNumber();
+                ny = y.AsNumber();
             }
             else
             {
-                ny = y.AsInteger();
-                nx = x.AsInteger();
+                ny = y.AsNumber();
+                nx = x.AsNumber();
             }
 
-            return nx < ny;
+            if (x.IsInteger() && y.IsInteger())
+            {
+                return (int) nx < (int) ny ? JsBoolean.True : JsBoolean.False;
+            }
+
+            if (!double.IsInfinity(nx) && !double.IsInfinity(ny) && !double.IsNaN(nx) && !double.IsNaN(ny))
+            {
+                return nx < ny ? JsBoolean.True : JsBoolean.False;
+            }
+
+            return CompareComplex(x, y, leftFirst);
         }
 
-        private static  JsValue CompareComplex(JsValue x, JsValue y, bool leftFirst)
+        private static JsValue CompareComplex(JsValue x, JsValue y, bool leftFirst)
         {
             JsValue px, py;
             if (leftFirst)
@@ -263,84 +298,148 @@ namespace Jint.Runtime.Interpreter.Expressions
 
             if (typea != Types.String || typeb != Types.String)
             {
+                if (typea == Types.BigInt || typeb == Types.BigInt)
+                {
+                    if (typea == typeb)
+                    {
+                        return TypeConverter.ToBigInt(px) < TypeConverter.ToBigInt(py) ? JsBoolean.True : JsBoolean.False;
+                    }
+
+                    if (typea == Types.BigInt)
+                    {
+                        if (py is JsString jsStringY)
+                        {
+                            if (!TypeConverter.TryStringToBigInt(jsStringY.ToString(), out var temp))
+                            {
+                                return JsValue.Undefined;
+                            }
+                            return TypeConverter.ToBigInt(px) < temp ? JsBoolean.True : JsBoolean.False;
+                        }
+
+                        var numberB = TypeConverter.ToNumber(py);
+                        if (double.IsNaN(numberB))
+                        {
+                            return JsValue.Undefined;
+                        }
+
+                        if (double.IsPositiveInfinity(numberB))
+                        {
+                            return JsBoolean.True;
+                        }
+
+                        if (double.IsNegativeInfinity(numberB))
+                        {
+                            return JsBoolean.False;
+                        }
+
+                        var normalized = new BigInteger(Math.Ceiling(numberB));
+                        return TypeConverter.ToBigInt(px) < normalized ? JsBoolean.True : JsBoolean.False;
+                    }
+
+                    if (px is JsString jsStringX)
+                    {
+                        if (!TypeConverter.TryStringToBigInt(jsStringX.ToString(), out var temp))
+                        {
+                            return JsValue.Undefined;
+                        }
+                        return temp < TypeConverter.ToBigInt(py) ? JsBoolean.True : JsBoolean.False;
+                    }
+
+                    var numberA = TypeConverter.ToNumber(px);
+                    if (double.IsNaN(numberA))
+                    {
+                        return JsValue.Undefined;
+                    }
+
+                    if (double.IsPositiveInfinity(numberA))
+                    {
+                        return JsBoolean.False;
+                    }
+
+                    if (double.IsNegativeInfinity(numberA))
+                    {
+                        return JsBoolean.True;
+                    }
+
+                    var normalizedA = new BigInteger(Math.Floor(numberA));
+                    return normalizedA < TypeConverter.ToBigInt(py);
+                }
+
                 var nx = TypeConverter.ToNumber(px);
                 var ny = TypeConverter.ToNumber(py);
 
                 if (double.IsNaN(nx) || double.IsNaN(ny))
                 {
-                    return Undefined.Instance;
+                    return JsValue.Undefined;
                 }
 
                 if (nx == ny)
                 {
-                    return false;
+                    return JsBoolean.False;
                 }
 
                 if (double.IsPositiveInfinity(nx))
                 {
-                    return false;
+                    return JsBoolean.False;
                 }
 
                 if (double.IsPositiveInfinity(ny))
                 {
-                    return true;
+                    return JsBoolean.True;
                 }
 
                 if (double.IsNegativeInfinity(ny))
                 {
-                    return false;
+                    return JsBoolean.False;
                 }
 
                 if (double.IsNegativeInfinity(nx))
                 {
-                    return true;
+                    return JsBoolean.True;
                 }
 
-                return nx < ny;
+                return nx < ny ? JsBoolean.True : JsBoolean.False;
             }
 
-            return string.CompareOrdinal(TypeConverter.ToString(x), TypeConverter.ToString(y)) < 0;
+            return string.CompareOrdinal(TypeConverter.ToString(x), TypeConverter.ToString(y)) < 0 ? JsBoolean.True : JsBoolean.False;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected static void BuildArguments(JintExpression[] jintExpressions, JsValue[] targetArray)
+        protected static void BuildArguments(EvaluationContext context, JintExpression[] jintExpressions, JsValue[] targetArray)
         {
-            for (var i = 0; i < jintExpressions.Length; i++)
+            for (uint i = 0; i < (uint) jintExpressions.Length; i++)
             {
-                targetArray[i] = jintExpressions[i].GetValue().Clone();
+                targetArray[i] = jintExpressions[i].GetValue(context).Clone();
             }
         }
 
-        protected JsValue[] BuildArgumentsWithSpreads(JintExpression[] jintExpressions)
+        protected static JsValue[] BuildArgumentsWithSpreads(EvaluationContext context, JintExpression[] jintExpressions)
         {
-            var args = new System.Collections.Generic.List<JsValue>(jintExpressions.Length);
-            for (var i = 0; i < jintExpressions.Length; i++)
+            var args = new List<JsValue>(jintExpressions.Length);
+            foreach (var jintExpression in jintExpressions)
             {
-                var jintExpression = jintExpressions[i];
                 if (jintExpression is JintSpreadExpression jse)
                 {
-                    jse.GetValueAndCheckIterator(out var objectInstance, out var iterator);
-                    // optimize for array
-                    if (objectInstance is ArrayInstance ai)
+                    jse.GetValueAndCheckIterator(context, out var objectInstance, out var iterator);
+                    // optimize for array unless someone has touched the iterator
+                    if (objectInstance is JsArray { HasOriginalIterator: true } ai)
                     {
                         var length = ai.GetLength();
                         for (uint j = 0; j < length; ++j)
                         {
-                            if (ai.TryGetValue(j, out var value))
-                            {
-                                args.Add(value);
-                            }
+                            ai.TryGetValue(j, out var value);
+                            args.Add(value);
                         }
                     }
                     else
                     {
-                        var protocol = new ArraySpreadProtocol(_engine, args, iterator);
+                        var protocol = new ArraySpreadProtocol(context.Engine, args, iterator!);
                         protocol.Execute();
                     }
                 }
                 else
                 {
-                    args.Add(jintExpression.GetValue().Clone());
+                    args.Add(jintExpression.GetValue(context).Clone());
                 }
             }
 
@@ -349,20 +448,19 @@ namespace Jint.Runtime.Interpreter.Expressions
 
         private sealed class ArraySpreadProtocol : IteratorProtocol
         {
-            private readonly System.Collections.Generic.List<JsValue> _instance;
+            private readonly List<JsValue> _instance;
 
             public ArraySpreadProtocol(
                 Engine engine,
-                System.Collections.Generic.List<JsValue> instance,
-                IIterator iterator) : base(engine, iterator, 0)
+                List<JsValue> instance,
+                IteratorInstance iterator) : base(engine, iterator, 0)
             {
                 _instance = instance;
             }
 
-            protected override void ProcessItem(JsValue[] args, JsValue currentValue)
+            protected override void ProcessItem(JsValue[] arguments, JsValue currentValue)
             {
-                var jsValue = ExtractValueFromIteratorInstance(currentValue);
-                _instance.Add(jsValue);
+                _instance.Add(currentValue);
             }
         }
 

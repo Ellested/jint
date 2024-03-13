@@ -1,46 +1,52 @@
-﻿using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Dynamic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using Jint.Collections;
 using Jint.Native.Array;
+using Jint.Native.BigInt;
 using Jint.Native.Boolean;
-using Jint.Native.Date;
-using Jint.Native.Function;
+using Jint.Native.Json;
 using Jint.Native.Number;
-using Jint.Native.RegExp;
 using Jint.Native.String;
 using Jint.Native.Symbol;
+using Jint.Native.TypedArray;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
-using Jint.Runtime.Descriptors.Specialized;
 using Jint.Runtime.Interop;
-using Jint.Runtime.Interpreter.Expressions;
+using PropertyDescriptor = Jint.Runtime.Descriptors.PropertyDescriptor;
+using TypeConverter = Jint.Runtime.TypeConverter;
 
 namespace Jint.Native.Object
 {
-    public class ObjectInstance : JsValue, IEquatable<ObjectInstance>
+    [DebuggerTypeProxy(typeof(ObjectInstanceDebugView))]
+    public partial class ObjectInstance : JsValue, IEquatable<ObjectInstance>
     {
         private bool _initialized;
         private readonly ObjectClass _class;
 
-        internal PropertyDictionary _properties;
-        internal SymbolDictionary _symbols;
+        internal PropertyDictionary? _properties;
+        internal SymbolDictionary? _symbols;
 
-        internal ObjectInstance _prototype;
+        internal ObjectInstance? _prototype;
         protected readonly Engine _engine;
 
-        public ObjectInstance(Engine engine) : this(engine, ObjectClass.Object)
+        protected ObjectInstance(Engine engine) : this(engine, ObjectClass.Object)
         {
         }
 
-        internal ObjectInstance(Engine engine, ObjectClass objectClass, InternalTypes type = InternalTypes.Object)
+        internal ObjectInstance(
+            Engine engine,
+            ObjectClass objectClass = ObjectClass.Object,
+            InternalTypes type = InternalTypes.Object)
             : base(type)
         {
             _engine = engine;
             _class = objectClass;
+            // if engine is ready, we can take default prototype for object
+            _prototype = engine.Realm.Intrinsics?.Object?.PrototypeObject;
+#pragma warning disable MA0056
             Extensible = true;
+#pragma warning restore MA0056
         }
 
         public Engine Engine
@@ -52,10 +58,11 @@ namespace Jint.Native.Object
         /// <summary>
         /// The prototype of this object.
         /// </summary>
-        public ObjectInstance Prototype
+        public ObjectInstance? Prototype
         {
             [DebuggerStepThrough]
             get => GetPrototypeOf();
+            set => SetPrototypeOf(value!);
         }
 
         /// <summary>
@@ -64,9 +71,9 @@ namespace Jint.Native.Object
         /// </summary>
         public virtual bool Extensible { get; private set; }
 
-        internal PropertyDictionary Properties
+        internal PropertyDictionary? Properties
         {
-            [DebuggerStepThrough]            
+            [DebuggerStepThrough]
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get => _properties;
         }
@@ -81,10 +88,16 @@ namespace Jint.Native.Object
             get => _class;
         }
 
+        public JsValue this[JsValue property]
+        {
+            get => Get(property);
+            set => Set(property, value);
+        }
+
         /// <summary>
         /// https://tc39.es/ecma262/#sec-construct
         /// </summary>
-        internal ObjectInstance Construct(IConstructor f, JsValue[] argumentsList = null, IConstructor newTarget = null)
+        internal static ObjectInstance Construct(IConstructor f, JsValue[]? argumentsList = null, IConstructor? newTarget = null)
         {
             newTarget ??= f;
             argumentsList ??= System.Array.Empty<JsValue>();
@@ -102,9 +115,10 @@ namespace Jint.Native.Object
                 return defaultConstructor;
             }
 
-            if (!(c is ObjectInstance oi))
+            var oi = c as ObjectInstance;
+            if (oi is null)
             {
-                return ExceptionHelper.ThrowTypeError<IConstructor>(o._engine);
+                ExceptionHelper.ThrowTypeError(o._engine.Realm);
             }
 
             var s = oi.Get(GlobalSymbolRegistry.Species);
@@ -117,12 +131,14 @@ namespace Jint.Native.Object
             {
                 return (IConstructor) s;
             }
-            
-            return ExceptionHelper.ThrowTypeError<IConstructor>(o._engine);
+
+            ExceptionHelper.ThrowTypeError(o._engine.Realm);
+            return null;
         }
 
+        internal void SetProperties(StringDictionarySlim<PropertyDescriptor> properties) => SetProperties(new PropertyDictionary(properties));
 
-        internal void SetProperties(PropertyDictionary properties)
+        internal void SetProperties(PropertyDictionary? properties)
         {
             if (properties != null)
             {
@@ -131,7 +147,7 @@ namespace Jint.Native.Object
             _properties = properties;
         }
 
-        internal void SetSymbols(SymbolDictionary symbols)
+        internal void SetSymbols(SymbolDictionary? symbols)
         {
             _symbols = symbols;
         }
@@ -217,53 +233,105 @@ namespace Jint.Native.Object
         {
             EnsureInitialized();
 
-            var keys = new List<JsValue>(_properties?.Count ?? 0 + _symbols?.Count ?? 0);
-            var propertyKeys = new List<JsValue>();
-            List<JsValue> symbolKeys = null;
+            var returningSymbols = (types & Types.Symbol) != Types.Empty && _symbols?.Count > 0;
+            var returningStringKeys = (types & Types.String) != Types.Empty && _properties?.Count > 0;
 
-            if ((types & Types.String) != 0 && _properties != null)
+            var propertyKeys = new List<JsValue>();
+            if ((types & Types.String) != Types.Empty)
+            {
+                var initialOwnStringPropertyKeys = GetInitialOwnStringPropertyKeys();
+                if (!ReferenceEquals(initialOwnStringPropertyKeys, System.Linq.Enumerable.Empty<JsValue>()))
+                {
+                    propertyKeys.AddRange(initialOwnStringPropertyKeys);
+                }
+            }
+
+            // check fast case where we don't need to sort, which should be the common case
+            if (!returningSymbols)
+            {
+                if (!returningStringKeys)
+                {
+                    return propertyKeys;
+                }
+
+                var propertyKeyCount = propertyKeys.Count;
+                propertyKeys.Capacity += _properties!.Count;
+                foreach (var pair in _properties)
+                {
+                    // check if we can rely on the property name not being an unsigned number
+                    var c = pair.Key.Name.Length > 0 ? pair.Key.Name[0] : 'a';
+                    if (char.IsDigit(c) && propertyKeyCount + _properties.Count > 1)
+                    {
+                        // jump to slow path, return list to original state
+                        propertyKeys.RemoveRange(propertyKeyCount, propertyKeys.Count - propertyKeyCount);
+                        return GetOwnPropertyKeysSorted(propertyKeys, returningStringKeys, returningSymbols);
+                    }
+                    propertyKeys.Add(new JsString(pair.Key.Name));
+                }
+
+                // seems good
+                return propertyKeys;
+            }
+
+            if ((types & Types.String) == Types.Empty && (types & Types.Symbol) != Types.Empty)
+            {
+                // only symbols requested
+                if (_symbols != null)
+                {
+                    foreach (var pair in _symbols!)
+                    {
+                        propertyKeys.Add(pair.Key);
+                    }
+                }
+                return propertyKeys;
+            }
+
+            return GetOwnPropertyKeysSorted(propertyKeys, returningStringKeys, returningSymbols);
+        }
+
+        private List<JsValue> GetOwnPropertyKeysSorted(List<JsValue> initialOwnPropertyKeys, bool returningStringKeys, bool returningSymbols)
+        {
+            var keys = new List<JsValue>(_properties?.Count ?? 0 + _symbols?.Count ?? 0 + initialOwnPropertyKeys.Count);
+            if (returningStringKeys && _properties != null)
             {
                 foreach (var pair in _properties)
                 {
-                    var isArrayIndex = ulong.TryParse(pair.Key, out var index);
-                    if (isArrayIndex)
+                    var propertyName = pair.Key.Name;
+                    var arrayIndex = ArrayInstance.ParseArrayIndex(propertyName);
+
+                    if (arrayIndex < ArrayOperations.MaxArrayLength)
                     {
-                        keys.Add(JsString.Create(index));
+                        keys.Add(JsString.Create(arrayIndex));
                     }
                     else
                     {
-                        propertyKeys.Add(new JsString(pair.Key));
+                        initialOwnPropertyKeys.Add(new JsString(propertyName));
                     }
                 }
             }
 
             keys.Sort((v1, v2) => TypeConverter.ToNumber(v1).CompareTo(TypeConverter.ToNumber(v2)));
-            keys.AddRange(propertyKeys);
+            keys.AddRange(initialOwnPropertyKeys);
 
-            if ((types & Types.Symbol) != 0 && _symbols != null)
+            if (returningSymbols)
             {
-                foreach (var pair in _symbols)
+                foreach (var pair in _symbols!)
                 {
-                    symbolKeys ??= new List<JsValue>();
-                    symbolKeys.Add(pair.Key);
+                    keys.Add(pair.Key);
                 }
-            }
-
-            if (symbolKeys != null)
-            {
-                keys.AddRange(symbolKeys);
             }
 
             return keys;
         }
 
+        internal virtual IEnumerable<JsValue> GetInitialOwnStringPropertyKeys() => System.Linq.Enumerable.Empty<JsValue>();
 
         protected virtual void AddProperty(JsValue property, PropertyDescriptor descriptor)
         {
             SetProperty(property, descriptor);
         }
 
-        protected virtual bool TryGetProperty(JsValue property, out PropertyDescriptor descriptor)
+        protected virtual bool TryGetProperty(JsValue property, [NotNullWhen(true)] out PropertyDescriptor? descriptor)
         {
             descriptor = null;
 
@@ -276,17 +344,10 @@ namespace Jint.Native.Object
             return _symbols?.TryGetValue((JsSymbol) key, out descriptor) == true;
         }
 
-        public override bool HasOwnProperty(JsValue property)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool HasOwnProperty(JsValue property)
         {
-            EnsureInitialized();
-
-            var key = TypeConverter.ToPropertyKey(property);
-            if (!key.IsSymbol())
-            {
-                return _properties?.ContainsKey(TypeConverter.ToString(key)) == true;
-            }
-
-            return _symbols?.ContainsKey((JsSymbol) key) == true;
+            return !ReferenceEquals(GetOwnProperty(property), PropertyDescriptor.Undefined);
         }
 
         public virtual void RemoveOwnProperty(JsValue property)
@@ -305,8 +366,24 @@ namespace Jint.Native.Object
 
         public override JsValue Get(JsValue property, JsValue receiver)
         {
-            var desc = GetProperty(property);
-            return UnwrapJsValue(desc, receiver);
+            if ((_type & InternalTypes.PlainObject) != InternalTypes.Empty && ReferenceEquals(this, receiver) && property is JsString jsString)
+            {
+                EnsureInitialized();
+                if (_properties?.TryGetValue(jsString.ToString(), out var ownDesc) == true)
+                {
+                    return UnwrapJsValue(ownDesc, receiver);
+                }
+            }
+            else
+            {
+                var desc = GetOwnProperty(property);
+                if (desc != PropertyDescriptor.Undefined)
+                {
+                    return UnwrapJsValue(desc, receiver);
+                }
+            }
+
+            return Prototype?.Get(property, receiver) ?? Undefined;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -317,13 +394,12 @@ namespace Jint.Native.Object
 
         internal static JsValue UnwrapJsValue(PropertyDescriptor desc, JsValue thisObject)
         {
-            var value = (desc._flags & PropertyFlag.CustomJsValue) != 0
+            var value = (desc._flags & PropertyFlag.CustomJsValue) != PropertyFlag.None
                 ? desc.CustomValue
                 : desc._value;
 
             // IsDataDescriptor inlined
-            if ((desc._flags & (PropertyFlag.WritableSet | PropertyFlag.Writable)) != 0
-                || !ReferenceEquals(value, null))
+            if ((desc._flags & (PropertyFlag.WritableSet | PropertyFlag.Writable)) != PropertyFlag.None || value is not null)
             {
                 return value ?? Undefined;
             }
@@ -343,9 +419,8 @@ namespace Jint.Native.Object
                 return Undefined;
             }
 
-            // if getter is not undefined it must be ICallable
-            var callable = getter.TryCast<ICallable>();
-            return callable.Call(thisObject, Arguments.Empty);
+            var functionInstance = (Function.Function) getter;
+            return functionInstance._engine.Call(functionInstance, thisObject);
         }
 
         /// <summary>
@@ -358,7 +433,7 @@ namespace Jint.Native.Object
         {
             EnsureInitialized();
 
-            PropertyDescriptor descriptor = null;
+            PropertyDescriptor? descriptor = null;
             var key = TypeConverter.ToPropertyKey(property);
             if (!key.IsSymbol())
             {
@@ -412,7 +487,7 @@ namespace Jint.Native.Object
                     return true;
                 }
 
-                var getter = desc.Get ??  Undefined;
+                var getter = desc.Get ?? Undefined;
                 if (getter.IsUndefined())
                 {
                     value = Undefined;
@@ -420,7 +495,7 @@ namespace Jint.Native.Object
                 }
 
                 // if getter is not undefined it must be ICallable
-                var callable = getter.TryCast<ICallable>();
+                var callable = (ICallable) getter;
                 value = callable.Call(this, Arguments.Empty);
                 return true;
             }
@@ -436,9 +511,9 @@ namespace Jint.Native.Object
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool Set(JsValue p, JsValue v, bool throwOnError)
         {
-            if (!Set(p, v, this) && throwOnError)
+            if (!Set(p, v) && throwOnError)
             {
-                ExceptionHelper.ThrowTypeError(_engine);
+                ExceptionHelper.ThrowTypeError(_engine.Realm);
             }
 
             return true;
@@ -447,21 +522,58 @@ namespace Jint.Native.Object
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool Set(JsValue property, JsValue value)
         {
+            if ((_type & InternalTypes.PlainObject) != InternalTypes.Empty && property is JsString jsString)
+            {
+                if (_properties?.TryGetValue(jsString.ToString(), out var ownDesc) == true)
+                {
+                    if ((ownDesc._flags & PropertyFlag.Writable) != PropertyFlag.None)
+                    {
+                        ownDesc._value = value;
+                        return true;
+                    }
+                }
+            }
+
             return Set(property, value, this);
         }
 
+        private static readonly PropertyDescriptor _marker = new(Undefined, PropertyFlag.ConfigurableEnumerableWritable);
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-ordinarysetwithowndescriptor
+        /// </summary>
         public override bool Set(JsValue property, JsValue value, JsValue receiver)
+        {
+            if ((_type & InternalTypes.PlainObject) != InternalTypes.Empty && ReferenceEquals(this, receiver) && property is JsString jsString)
+            {
+                var key = (Key) jsString.ToString();
+                if (_properties?.TryGetValue(key, out var ownDesc) == true)
+                {
+                    if ((ownDesc._flags & PropertyFlag.Writable) != PropertyFlag.None)
+                    {
+                        ownDesc._value = value;
+                        return true;
+                    }
+                }
+            }
+
+            return SetUnlikely(property, value, receiver);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private bool SetUnlikely(JsValue property, JsValue value, JsValue receiver)
         {
             var ownDesc = GetOwnProperty(property);
 
             if (ownDesc == PropertyDescriptor.Undefined)
             {
                 var parent = GetPrototypeOf();
-                if (!(parent is null))
+                if (parent is not null)
                 {
                     return parent.Set(property, value, receiver);
                 }
-                ownDesc = new PropertyDescriptor(Undefined, PropertyFlag.ConfigurableEnumerableWritable);
+
+                ownDesc = _marker;
             }
 
             if (ownDesc.IsDataDescriptor())
@@ -471,7 +583,7 @@ namespace Jint.Native.Object
                     return false;
                 }
 
-                if (!(receiver is ObjectInstance oi))
+                if (receiver is not ObjectInstance oi)
                 {
                     return false;
                 }
@@ -498,23 +610,26 @@ namespace Jint.Native.Object
                 }
             }
 
-            if (!(ownDesc.Set is ICallable setter))
+            if (ownDesc.Set is not Function.Function setter)
             {
                 return false;
             }
 
-            setter.Call(receiver, new[] {value});
+            _engine.Call(setter, receiver, new[]
+            {
+                value
+            }, expression: null);
 
             return true;
         }
-        
+
         /// <summary>
         /// Returns a Boolean value indicating whether a
         /// [[Put]] operation with PropertyName can be
         /// performed.
         /// http://www.ecma-international.org/ecma-262/5.1/#sec-8.12.4
         /// </summary>
-        public bool CanPut(JsValue property)
+        internal bool CanPut(JsValue property)
         {
             var desc = GetOwnProperty(property);
 
@@ -570,16 +685,17 @@ namespace Jint.Native.Object
         /// </summary>
         public virtual bool HasProperty(JsValue property)
         {
-            var hasOwn = GetOwnProperty(property);
+            var key = TypeConverter.ToPropertyKey(property);
+            var hasOwn = GetOwnProperty(key);
             if (hasOwn != PropertyDescriptor.Undefined)
             {
                 return true;
             }
 
             var parent = GetPrototypeOf();
-            if (parent != null)
+            if (parent is not null)
             {
-                return parent.HasProperty(property);
+                return parent.HasProperty(key);
             }
 
             return false;
@@ -588,11 +704,11 @@ namespace Jint.Native.Object
         /// <summary>
         /// https://tc39.es/ecma262/#sec-deletepropertyorthrow
         /// </summary>
-        public bool DeletePropertyOrThrow(JsValue property)
+        internal bool DeletePropertyOrThrow(JsValue property)
         {
             if (!Delete(property))
             {
-                ExceptionHelper.ThrowTypeError(Engine);
+                ExceptionHelper.ThrowTypeError(_engine.Realm);
             }
             return true;
         }
@@ -620,38 +736,35 @@ namespace Jint.Native.Object
             return false;
         }
 
-        public bool DefinePropertyOrThrow(JsValue property, PropertyDescriptor desc)
+        internal bool DefinePropertyOrThrow(JsValue property, PropertyDescriptor desc)
         {
             if (!DefineOwnProperty(property, desc))
             {
-                ExceptionHelper.ThrowTypeError(_engine);
+                ExceptionHelper.ThrowTypeError(_engine.Realm, "Cannot redefine property: " + property);
             }
 
             return true;
         }
 
         /// <summary>
-        /// Creates or alters the named own property to
-        /// have the state described by a Property
-        /// Descriptor. The flag controls failure handling.
+        /// Creates or alters the named own property to have the state described by a PropertyDescriptor.
         /// </summary>
         public virtual bool DefineOwnProperty(JsValue property, PropertyDescriptor desc)
         {
             var current = GetOwnProperty(property);
-            var extensible = Extensible;
 
             if (current == desc)
             {
                 return true;
             }
 
-            return ValidateAndApplyPropertyDescriptor(this, property, extensible, desc, current);
+            return ValidateAndApplyPropertyDescriptor(this, property, Extensible, desc, current);
         }
 
         /// <summary>
         /// https://tc39.es/ecma262/#sec-validateandapplypropertydescriptor
         /// </summary>
-        protected static bool ValidateAndApplyPropertyDescriptor(ObjectInstance o, JsValue property, bool extensible, PropertyDescriptor desc, PropertyDescriptor current)
+        protected static bool ValidateAndApplyPropertyDescriptor(ObjectInstance? o, JsValue property, bool extensible, PropertyDescriptor desc, PropertyDescriptor current)
         {
             var descValue = desc.Value;
             if (current == PropertyDescriptor.Undefined)
@@ -661,7 +774,7 @@ namespace Jint.Native.Object
                     return false;
                 }
 
-                if (o is object)
+                if (o is not null)
                 {
                     if (desc.IsGenericDescriptor() || desc.IsDataDescriptor())
                     {
@@ -670,7 +783,7 @@ namespace Jint.Native.Object
                         {
                             propertyDescriptor = new PropertyDescriptor(descValue ?? Undefined, PropertyFlag.ConfigurableEnumerableWritable);
                         }
-                        else if ((desc._flags & PropertyFlag.ConfigurableEnumerableWritable) == 0)
+                        else if ((desc._flags & PropertyFlag.ConfigurableEnumerableWritable) == PropertyFlag.None)
                         {
                             propertyDescriptor = new PropertyDescriptor(descValue ?? Undefined, PropertyFlag.AllForbidden);
                         }
@@ -682,12 +795,17 @@ namespace Jint.Native.Object
                             };
                         }
 
-                        propertyDescriptor._flags |= desc._flags & PropertyFlag.MutableBinding; 
                         o.SetOwnProperty(property, propertyDescriptor);
                     }
                     else
                     {
-                        o.SetOwnProperty(property, new GetSetPropertyDescriptor(desc));
+                        var descriptor = new GetSetPropertyDescriptor(desc.Get, desc.Set, PropertyFlag.None)
+                        {
+                            Enumerable = desc.Enumerable,
+                            Configurable = desc.Configurable
+                        };
+
+                        o.SetOwnProperty(property, descriptor);
                     }
                 }
 
@@ -699,7 +817,8 @@ namespace Jint.Native.Object
             var currentSet = current.Set;
             var currentValue = current.Value;
 
-            if ((current._flags & (PropertyFlag.ConfigurableSet | PropertyFlag.EnumerableSet | PropertyFlag.WritableSet)) == 0 &&
+            // 4. If every field in Desc is absent, return true.
+            if ((current._flags & (PropertyFlag.ConfigurableSet | PropertyFlag.EnumerableSet | PropertyFlag.WritableSet)) == PropertyFlag.None &&
                 ReferenceEquals(currentGet, null) &&
                 ReferenceEquals(currentSet, null) &&
                 ReferenceEquals(currentValue, null))
@@ -716,7 +835,7 @@ namespace Jint.Native.Object
                 current.Enumerable == desc.Enumerable && current.EnumerableSet == desc.EnumerableSet &&
                 ((ReferenceEquals(currentGet, null) && ReferenceEquals(descGet, null)) || (!ReferenceEquals(currentGet, null) && !ReferenceEquals(descGet, null) && SameValue(currentGet, descGet))) &&
                 ((ReferenceEquals(currentSet, null) && ReferenceEquals(descSet, null)) || (!ReferenceEquals(currentSet, null) && !ReferenceEquals(descSet, null) && SameValue(currentSet, descSet))) &&
-                ((ReferenceEquals(currentValue, null) && ReferenceEquals(descValue, null)) || (!ReferenceEquals(currentValue, null) && !ReferenceEquals(descValue, null) && JintBinaryExpression.StrictlyEqual(currentValue, descValue)))
+                ((ReferenceEquals(currentValue, null) && ReferenceEquals(descValue, null)) || (!ReferenceEquals(currentValue, null) && !ReferenceEquals(descValue, null) && currentValue == descValue))
             )
             {
                 return true;
@@ -744,10 +863,9 @@ namespace Jint.Native.Object
                         return false;
                     }
 
-
-                    if (o is object)
+                    if (o is not null)
                     {
-                        var flags = current.Flags & ~(PropertyFlag.Writable | PropertyFlag.WritableSet);
+                        var flags = current.Flags & ~(PropertyFlag.Writable | PropertyFlag.WritableSet | PropertyFlag.CustomJsValue);
                         if (current.IsDataDescriptor())
                         {
                             o.SetOwnProperty(property, current = new GetSetPropertyDescriptor(
@@ -776,7 +894,7 @@ namespace Jint.Native.Object
 
                         if (!current.Writable)
                         {
-                            if (!ReferenceEquals(descValue, null) && !SameValue(descValue, currentValue))
+                            if (!ReferenceEquals(descValue, null) && !SameValue(descValue, currentValue!))
                             {
                                 return false;
                             }
@@ -797,7 +915,7 @@ namespace Jint.Native.Object
                 }
             }
 
-            if (o is object)
+            if (o is not null)
             {
                 if (!ReferenceEquals(descValue, null))
                 {
@@ -819,7 +937,7 @@ namespace Jint.Native.Object
                     current.Configurable = desc.Configurable;
                 }
 
-                PropertyDescriptor mutable = null;
+                PropertyDescriptor? mutable = null;
                 if (!ReferenceEquals(descGet, null))
                 {
                     mutable = new GetSetPropertyDescriptor(mutable ?? current);
@@ -835,33 +953,15 @@ namespace Jint.Native.Object
                 if (mutable != null)
                 {
                     // replace old with new type that supports get and set
-                    o.FastSetProperty(property, mutable);
+                    o.SetOwnProperty(property, mutable);
                 }
             }
 
             return true;
         }
 
-        /// <summary>
-        /// Optimized version of [[Put]] when the property is known to be undeclared already
-        /// </summary>
-        public void FastAddProperty(JsValue name, JsValue value, bool writable, bool enumerable, bool configurable)
-        {
-            SetOwnProperty(name, new PropertyDescriptor(value, writable, enumerable, configurable));
-        }
-
-        /// <summary>
-        /// Optimized version of [[Put]] when the property is known to be already declared
-        /// </summary>
-        /// <param name="name"></param>
-        /// <param name="value"></param>
-        public void FastSetProperty(JsValue name, PropertyDescriptor value)
-        {
-            SetOwnProperty(name, value);
-        }
-
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected void EnsureInitialized()
+        protected internal void EnsureInitialized()
         {
             if (_initialized)
             {
@@ -877,75 +977,49 @@ namespace Jint.Native.Object
         {
         }
 
-        public override string ToString()
+        public override object ToObject()
         {
-            return TypeConverter.ToString(this);
+            return ToObject(new ObjectTraverseStack(_engine));
         }
 
-        public override object ToObject()
+        private object ToObject(ObjectTraverseStack stack)
         {
             if (this is IObjectWrapper wrapper)
             {
                 return wrapper.Target;
             }
 
+            stack.Enter(this);
+            object? converted = null;
             switch (Class)
             {
-                case ObjectClass.Array:
-                    if (this is ArrayInstance arrayInstance)
-                    {
-                        var len = TypeConverter.ToInt32(arrayInstance.Get(CommonProperties.Length, arrayInstance));
-                        var result = new object[len];
-                        for (var k = 0; k < len; k++)
-                        {
-                            var pk = TypeConverter.ToJsString(k);
-                            var kpresent = arrayInstance.HasProperty(pk);
-                            if (kpresent)
-                            {
-                                var kvalue = arrayInstance.Get(pk, arrayInstance);
-                                result[k] = kvalue.ToObject();
-                            }
-                            else
-                            {
-                                result[k] = null;
-                            }
-                        }
-
-                        return result;
-                    }
-
-                    break;
-
                 case ObjectClass.String:
                     if (this is StringInstance stringInstance)
                     {
-                        return stringInstance.PrimitiveValue.ToString();
+                        converted = stringInstance.StringData.ToString();
                     }
-
                     break;
 
                 case ObjectClass.Date:
-                    if (this is DateInstance dateInstance)
+                    if (this is JsDate dateInstance)
                     {
-                        return dateInstance.ToDateTime();
+                        converted = dateInstance.ToDateTime();
                     }
-
                     break;
 
                 case ObjectClass.Boolean:
                     if (this is BooleanInstance booleanInstance)
                     {
-                        return ((JsBoolean) booleanInstance.PrimitiveValue)._value
-                             ? JsBoolean.BoxedTrue
-                             : JsBoolean.BoxedFalse;
+                        converted = ((JsBoolean) booleanInstance.BooleanData)._value
+                            ? JsBoolean.BoxedTrue
+                            : JsBoolean.BoxedFalse;
                     }
-
                     break;
 
                 case ObjectClass.Function:
-                    if (this is FunctionInstance function)
+                    if (this is ICallable function)
                     {
-                        return (Func<JsValue, JsValue[], JsValue>) function.Call;
+                        converted = (Func<JsValue, JsValue[], JsValue>) function.Call;
                     }
 
                     break;
@@ -953,22 +1027,91 @@ namespace Jint.Native.Object
                 case ObjectClass.Number:
                     if (this is NumberInstance numberInstance)
                     {
-                        return numberInstance.NumberData._value;
+                        converted = numberInstance.NumberData._value;
                     }
-
                     break;
 
                 case ObjectClass.RegExp:
-                    if (this is RegExpInstance regeExpInstance)
+                    if (this is JsRegExp regeExpInstance)
                     {
-                        return regeExpInstance.Value;
+                        converted = regeExpInstance.Value;
                     }
-
                     break;
 
                 case ObjectClass.Arguments:
                 case ObjectClass.Object:
-                    IDictionary<string, object> o = new ExpandoObject();
+
+                    if (this is JsArray arrayInstance)
+                    {
+                        var result = new object?[arrayInstance.GetLength()];
+                        for (uint i = 0; i < result.Length; i++)
+                        {
+                            var value = arrayInstance[i];
+                            object? valueToSet = null;
+                            if (!value.IsUndefined())
+                            {
+                                valueToSet = value is ObjectInstance oi
+                                    ? oi.ToObject(stack)
+                                    : value.ToObject();
+                            }
+                            result[i] = valueToSet;
+                        }
+                        converted = result;
+                        break;
+                    }
+
+                    if (this is JsTypedArray typedArrayInstance)
+                    {
+                        converted = typedArrayInstance._arrayElementType switch
+                        {
+                            TypedArrayElementType.Int8 => typedArrayInstance.ToNativeArray<sbyte>(),
+                            TypedArrayElementType.Int16 => typedArrayInstance.ToNativeArray<short>(),
+                            TypedArrayElementType.Int32 => typedArrayInstance.ToNativeArray<int>(),
+                            TypedArrayElementType.BigInt64 => typedArrayInstance.ToNativeArray<long>(),
+                            TypedArrayElementType.Float32 => typedArrayInstance.ToNativeArray<float>(),
+                            TypedArrayElementType.Float64 => typedArrayInstance.ToNativeArray<double>(),
+                            TypedArrayElementType.Uint8 => typedArrayInstance.ToNativeArray<byte>(),
+                            TypedArrayElementType.Uint8C => typedArrayInstance.ToNativeArray<byte>(),
+                            TypedArrayElementType.Uint16 => typedArrayInstance.ToNativeArray<ushort>(),
+                            TypedArrayElementType.Uint32 => typedArrayInstance.ToNativeArray<uint>(),
+                            TypedArrayElementType.BigUint64 => typedArrayInstance.ToNativeArray<ulong>(),
+                            _ => throw new NotSupportedException("cannot handle element type")
+                        };
+
+                        break;
+                    }
+
+                    if (this is JsArrayBuffer arrayBuffer)
+                    {
+                        // TODO: What to do here when buffer is detached? We're not allowed to return null
+                        arrayBuffer.AssertNotDetached();
+                        converted = arrayBuffer.ArrayBufferData;
+                        break;
+                    }
+
+                    if (this is JsDataView dataView)
+                    {
+                        // TODO: What to do here when buffer is detached? We're not allowed to return null
+                        dataView._viewedArrayBuffer!.AssertNotDetached();
+                        var res = new byte[dataView._byteLength];
+                        System.Array.Copy(dataView._viewedArrayBuffer._arrayBufferData!, dataView._byteOffset, res, 0, dataView._byteLength);
+                        converted = res;
+                        break;
+                    }
+
+                    if (this is BigIntInstance bigIntInstance)
+                    {
+                        converted = bigIntInstance.BigIntData._value;
+                        break;
+                    }
+
+                    var func = _engine.Options.Interop.CreateClrObject;
+                    if (func is null)
+                    {
+                        goto default;
+                    }
+
+                    var o = func(this);
                     foreach (var p in GetOwnProperties())
                     {
                         if (!p.Value.Enumerable)
@@ -976,14 +1119,23 @@ namespace Jint.Native.Object
                             continue;
                         }
 
-                        o.Add(p.Key.ToString(), Get(p.Key, this).ToObject());
+                        var key = p.Key.ToString();
+                        var propertyValue = Get(p.Key);
+                        var value = propertyValue is ObjectInstance oi
+                            ? oi.ToObject(stack)
+                            : propertyValue.ToObject();
+                        o.Add(key, value);
                     }
 
-                    return o;
+                    converted = o;
+                    break;
+                default:
+                    converted = this;
+                    break;
             }
 
-
-            return this;
+            stack.Exit();
+            return converted!;
         }
 
         /// <summary>
@@ -991,72 +1143,78 @@ namespace Jint.Native.Object
         /// </summary>
         internal virtual bool FindWithCallback(
             JsValue[] arguments,
-            out uint index,
+            out ulong index,
             out JsValue value,
-            bool visitUnassigned)
+            bool visitUnassigned,
+            bool fromEnd = false)
         {
-            long GetLength()
+            ulong GetLength()
             {
-                var desc = GetProperty(CommonProperties.Length);
-                var descValue = desc.Value;
-                double len;
-                if (desc.IsDataDescriptor() && !ReferenceEquals(descValue, null))
-                {
-                    len = TypeConverter.ToNumber(descValue);
-                }
-                else
-                {
-                    var getter = desc.Get ?? Undefined;
-                    if (getter.IsUndefined())
-                    {
-                        len = 0;
-                    }
-                    else
-                    {
-                        // if getter is not undefined it must be ICallable
-                        len = TypeConverter.ToNumber(((ICallable) getter).Call(this, Arguments.Empty));
-                    }
-                }
+                var descValue = Get(CommonProperties.Length);
+                var len = TypeConverter.ToNumber(descValue);
 
-                return (long) System.Math.Max(
-                    0, 
+                return (ulong) System.Math.Max(
+                    0,
                     System.Math.Min(len, ArrayOperations.MaxArrayLikeLength));
             }
 
-            bool TryGetValue(uint idx, out JsValue jsValue)
+            bool TryGetValue(ulong idx, out JsValue jsValue)
             {
                 var property = JsString.Create(idx);
                 var kPresent = HasProperty(property);
-                jsValue = kPresent ? Get(property, this) : Undefined;
+                jsValue = kPresent ? Get(property) : Undefined;
                 return kPresent;
             }
 
-            if (GetLength() == 0)
+            var length = GetLength();
+            if (length == 0)
             {
                 index = 0;
                 value = Undefined;
                 return false;
             }
-            
+
             var callbackfn = arguments.At(0);
             var thisArg = arguments.At(1);
             var callable = GetCallable(callbackfn);
 
             var args = _engine._jsValueArrayPool.RentArray(3);
             args[2] = this;
-            var length = GetLength();
-            for (uint k = 0; k < length; k++)
+
+            if (!fromEnd)
             {
-                if (TryGetValue(k, out var kvalue) || visitUnassigned)
+                for (ulong k = 0; k < length; k++)
                 {
-                    args[0] = kvalue;
-                    args[1] = k;
-                    var testResult = callable.Call(thisArg, args);
-                    if (TypeConverter.ToBoolean(testResult))
+                    if (TryGetValue(k, out var kvalue) || visitUnassigned)
                     {
-                        index = k;
-                        value = kvalue;
-                        return true;
+                        args[0] = kvalue;
+                        args[1] = k;
+                        var testResult = callable.Call(thisArg, args);
+                        if (TypeConverter.ToBoolean(testResult))
+                        {
+                            index = k;
+                            value = kvalue;
+                            return true;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                for (var k = (long) (length - 1); k >= 0; k--)
+                {
+                    if (TryGetValue((ulong) k, out var kvalue) || visitUnassigned)
+                    {
+                        kvalue ??= Undefined;
+                        args[0] = kvalue;
+                        args[1] = k;
+                        var testResult = callable.Call(thisArg, args);
+                        if (TypeConverter.ToBoolean(testResult))
+                        {
+                            index = (ulong) k;
+                            value = kvalue;
+                            return true;
+                        }
                     }
                 }
             }
@@ -1068,21 +1226,14 @@ namespace Jint.Native.Object
             return false;
         }
 
-        protected ICallable GetCallable(JsValue source)
-        {
-            if (source is ICallable callable)
-            {
-                return callable;
-            }
+        internal ICallable GetCallable(JsValue source) => source.GetCallable(_engine.Realm);
 
-            return ExceptionHelper.ThrowTypeError<ICallable>(_engine, "Argument must be callable");
-        }
-
+        [DebuggerBrowsable(DebuggerBrowsableState.Never)]
         internal bool IsConcatSpreadable
         {
             get
             {
-                var spreadable = Get(GlobalSymbolRegistry.IsConcatSpreadable, this);
+                var spreadable = Get(GlobalSymbolRegistry.IsConcatSpreadable);
                 if (!spreadable.IsUndefined())
                 {
                     return TypeConverter.ToBoolean(spreadable);
@@ -1091,20 +1242,26 @@ namespace Jint.Native.Object
             }
         }
 
-        public virtual bool IsArrayLike => TryGetValue(CommonProperties.Length, out var lengthValue)
-                                           && lengthValue.IsNumber()
-                                           && ((JsNumber) lengthValue)._value >= 0;
+        [DebuggerBrowsable(DebuggerBrowsableState.Never)]
+        internal virtual bool IsArrayLike => TryGetValue(CommonProperties.Length, out var lengthValue)
+                                             && lengthValue.IsNumber()
+                                             && ((JsNumber) lengthValue)._value >= 0;
 
+        // safe default
+        [DebuggerBrowsable(DebuggerBrowsableState.Never)]
+        internal virtual bool HasOriginalIterator => false;
 
-        public virtual uint Length => (uint) TypeConverter.ToLength(Get(CommonProperties.Length));
+        internal override bool IsIntegerIndexedArray => false;
 
-        public virtual JsValue PreventExtensions()
+        internal virtual uint GetLength() => (uint) TypeConverter.ToLength(Get(CommonProperties.Length));
+
+        public virtual bool PreventExtensions()
         {
             Extensible = false;
-            return JsBoolean.True;
+            return true;
         }
 
-        protected virtual ObjectInstance GetPrototypeOf()
+        protected internal virtual ObjectInstance? GetPrototypeOf()
         {
             return _prototype;
         }
@@ -1112,7 +1269,7 @@ namespace Jint.Native.Object
         /// <summary>
         /// https://tc39.es/ecma262/#sec-ordinarysetprototypeof
         /// </summary>
-        public virtual bool SetPrototypeOf(JsValue value)
+        internal virtual bool SetPrototypeOf(JsValue value)
         {
             if (!value.IsObject() && !value.IsNull())
             {
@@ -1160,34 +1317,85 @@ namespace Jint.Native.Object
         }
 
         /// <summary>
-        /// https://tc39.es/ecma262/#sec-createdatapropertyorthrow
+        /// https://tc39.es/ecma262/#sec-setfunctionname
         /// </summary>
-        internal bool CreateDataProperty(JsValue p, JsValue v)
+        internal void SetFunctionName(JsValue name, string? prefix = null)
         {
-            var newDesc = new PropertyDescriptor(v, PropertyFlag.ConfigurableEnumerableWritable);
+            if (name is JsSymbol symbol)
+            {
+                name = symbol._value.IsUndefined()
+                    ? JsString.Empty
+                    : new JsString("[" + symbol._value + "]");
+            }
+            if (!string.IsNullOrWhiteSpace(prefix))
+            {
+                name = prefix + " " + name;
+            }
+
+            DefinePropertyOrThrow(CommonProperties.Name, new PropertyDescriptor(name, PropertyFlag.Configurable));
+        }
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-createmethodproperty
+        /// </summary>
+        internal virtual bool CreateMethodProperty(JsValue p, JsValue v)
+        {
+            var newDesc = new PropertyDescriptor(v, PropertyFlag.NonEnumerable);
             return DefineOwnProperty(p, newDesc);
         }
 
         /// <summary>
+        /// https://tc39.es/ecma262/#sec-createdatapropertyorthrow
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool CreateDataProperty(JsValue p, JsValue v)
+        {
+            return DefineOwnProperty(p, new PropertyDescriptor(v, PropertyFlag.ConfigurableEnumerableWritable));
+        }
+
+
+        /// <summary>
         /// https://tc39.es/ecma262/#sec-createdataproperty
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal bool CreateDataPropertyOrThrow(JsValue p, JsValue v)
         {
             if (!CreateDataProperty(p, v))
             {
-                ExceptionHelper.ThrowTypeError(_engine);
+                ExceptionHelper.ThrowTypeError(_engine.Realm);
             }
 
             return true;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal ICallable GetMethod(JsValue property)
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-createnonenumerabledatapropertyorthrow
+        /// </summary>
+        internal void CreateNonEnumerableDataPropertyOrThrow(JsValue p, JsValue v)
         {
-            return GetMethod(_engine, this, property);
+            var newDesc = new PropertyDescriptor(v, true, false, true);
+            DefinePropertyOrThrow(p, newDesc);
         }
 
-        internal static ICallable GetMethod(Engine engine, JsValue v, JsValue p)
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-ordinaryobjectcreate
+        /// </summary>
+        internal static JsObject OrdinaryObjectCreate(Engine engine, ObjectInstance? proto)
+        {
+            var prototype = new JsObject(engine)
+            {
+                _prototype = proto
+            };
+            return prototype;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal ICallable? GetMethod(JsValue property)
+        {
+            return GetMethod(_engine.Realm, this, property);
+        }
+
+        internal static ICallable? GetMethod(Realm realm, JsValue v, JsValue p)
         {
             var jsValue = v.Get(p);
             if (jsValue.IsNullOrUndefined())
@@ -1195,18 +1403,23 @@ namespace Jint.Native.Object
                 return null;
             }
 
-            return jsValue as ICallable ?? ExceptionHelper.ThrowTypeError<ICallable>(engine, "Value returned for property '" + p + "' of object is not a function");
+            var callable = jsValue as ICallable;
+            if (callable is null)
+            {
+                ExceptionHelper.ThrowTypeError(realm, "Value returned for property '" + p + "' of object is not a function");
+            }
+            return callable;
         }
 
         internal void CopyDataProperties(
             ObjectInstance target,
-            HashSet<JsValue> processedProperties)
+            HashSet<JsValue>? excludedItems)
         {
             var keys = GetOwnPropertyKeys();
             for (var i = 0; i < keys.Count; i++)
             {
                 var key = keys[i];
-                if (processedProperties == null || !processedProperties.Contains(key))
+                if (excludedItems == null || !excludedItems.Contains(key))
                 {
                     var desc = GetOwnProperty(key);
                     if (desc.Enumerable)
@@ -1217,11 +1430,11 @@ namespace Jint.Native.Object
             }
         }
 
-        internal JsValue EnumerableOwnPropertyNames(EnumerableOwnPropertyNamesKind kind)
+        internal JsArray EnumerableOwnProperties(EnumerableOwnPropertyNamesKind kind)
         {
             var ownKeys = GetOwnPropertyKeys(Types.String);
 
-            var array = Engine.Array.ConstructFast((uint) ownKeys.Count);
+            var array = Engine.Realm.Intrinsics.Array.ArrayCreate((uint) ownKeys.Count);
             uint index = 0;
 
             for (var i = 0; i < ownKeys.Count; i++)
@@ -1232,7 +1445,7 @@ namespace Jint.Native.Object
                 {
                     continue;
                 }
-                
+
                 var desc = GetOwnProperty(property);
                 if (desc != PropertyDescriptor.Undefined && desc.Enumerable)
                 {
@@ -1249,11 +1462,10 @@ namespace Jint.Native.Object
                         }
                         else
                         {
-                            array.SetIndexValue(index, _engine.Array.Construct(new[]
-                            {
-                                property,
-                                value
-                            }), updateLength: false);
+                            var objectInstance = _engine.Realm.Intrinsics.Array.ArrayCreate(2);
+                            objectInstance.SetIndexValue(0, property, updateLength: false);
+                            objectInstance.SetIndexValue(1, value, updateLength: false);
+                            array.SetIndexValue(index, objectInstance, updateLength: false);
                         }
                     }
 
@@ -1274,33 +1486,27 @@ namespace Jint.Native.Object
 
         internal ObjectInstance AssertThisIsObjectInstance(JsValue value, string methodName)
         {
-            return value as ObjectInstance ?? ThrowIncompatibleReceiver<ObjectInstance>(value, methodName);
+            var instance = value as ObjectInstance;
+            if (instance is null)
+            {
+                ThrowIncompatibleReceiver(value, methodName);
+            }
+            return instance!;
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private T ThrowIncompatibleReceiver<T>(JsValue value, string methodName)
+        private void ThrowIncompatibleReceiver(JsValue value, string methodName)
         {
-            return ExceptionHelper.ThrowTypeError<T>(_engine, $"Method {methodName} called on incompatible receiver {value}");
+            ExceptionHelper.ThrowTypeError(_engine.Realm, $"Method {methodName} called on incompatible receiver {value}");
         }
 
-        public override bool Equals(JsValue obj)
+        public override bool Equals(object? obj) => Equals(obj as ObjectInstance);
+
+        public override bool Equals(JsValue? other) => Equals(other as ObjectInstance);
+
+        public bool Equals(ObjectInstance? other)
         {
-            if (ReferenceEquals(null, obj))
-            {
-                return false;
-            }
-
-            if (!(obj is ObjectInstance s))
-            {
-                return false;
-            }
-
-            return Equals(s);
-        }
-
-        public bool Equals(ObjectInstance other)
-        {
-            if (ReferenceEquals(null, other))
+            if (other is null)
             {
                 return false;
             }
@@ -1311,6 +1517,209 @@ namespace Jint.Native.Object
             }
 
             return false;
+        }
+
+        public override int GetHashCode() => RuntimeHelpers.GetHashCode(this);
+
+        internal IEnumerable<JsValue> GetKeys()
+        {
+            var visited = new HashSet<JsValue>();
+            foreach (var key in GetOwnPropertyKeys(Types.String))
+            {
+                var desc = GetOwnProperty(key);
+                if (desc != PropertyDescriptor.Undefined)
+                {
+                    visited.Add(key);
+                    if (desc.Enumerable)
+                    {
+                        yield return key;
+                    }
+                }
+            }
+
+            if (Prototype is null)
+            {
+                yield break;
+            }
+
+            foreach (var protoKey in Prototype.GetKeys())
+            {
+                if (!visited.Contains(protoKey))
+                {
+                    yield return protoKey;
+                }
+            }
+        }
+
+        public override string ToString()
+        {
+            return TypeConverter.ToString(this);
+        }
+
+        internal virtual ulong GetSmallestIndex(ulong length)
+        {
+            // there are some evil tests that iterate a lot with unshift..
+            if (Properties == null)
+            {
+                return 0;
+            }
+
+            var min = length;
+            foreach (var entry in GetOwnProperties())
+            {
+                if (ulong.TryParse(entry.Key.ToString(), out var index))
+                {
+                    min = System.Math.Min(index, min);
+                }
+            }
+
+            if (Prototype?.Properties != null)
+            {
+                foreach (var entry in Prototype.GetOwnProperties())
+                {
+                    if (ulong.TryParse(entry.Key.ToString(), out var index))
+                    {
+                        min = System.Math.Min(index, min);
+                    }
+                }
+            }
+
+            return min;
+        }
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-invoke
+        /// </summary>
+        internal JsValue Invoke(JsValue v, JsValue p, JsValue[] arguments)
+        {
+            var func = v.GetV(_engine.Realm, p);
+            if (func is not ICallable callable)
+            {
+                ExceptionHelper.ThrowTypeError(_engine.Realm, "Can only invoke functions");
+                return default;
+            }
+
+            return callable.Call(v, arguments);
+        }
+
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-setintegritylevel
+        /// </summary>
+        internal bool SetIntegrityLevel(IntegrityLevel level)
+        {
+            var status = PreventExtensions();
+            if (!status)
+            {
+                return false;
+            }
+
+            var keys = GetOwnPropertyKeys();
+            if (level == IntegrityLevel.Sealed)
+            {
+                for (var i = 0; i < keys.Count; i++)
+                {
+                    var k = keys[i];
+                    DefinePropertyOrThrow(k, new PropertyDescriptor { Configurable = false });
+                }
+            }
+            else
+            {
+                for (var i = 0; i < keys.Count; i++)
+                {
+                    var k = keys[i];
+                    var currentDesc = GetOwnProperty(k);
+                    if (currentDesc != PropertyDescriptor.Undefined)
+                    {
+                        PropertyDescriptor desc;
+                        if (currentDesc.IsAccessorDescriptor())
+                        {
+                            desc = new PropertyDescriptor { Configurable = false };
+                        }
+                        else
+                        {
+                            desc = new PropertyDescriptor { Configurable = false, Writable = false };
+                        }
+
+                        DefinePropertyOrThrow(k, desc);
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-definefield
+        /// </summary>
+        internal static void DefineField(ObjectInstance receiver, ClassFieldDefinition fieldRecord)
+        {
+            var fieldName = fieldRecord.Name;
+            var initializer = fieldRecord.Initializer;
+            var initValue = Undefined;
+            if (initializer is not null)
+            {
+                initValue = receiver._engine.Call(initializer, receiver);
+                if (initValue is Function.Function functionInstance)
+                {
+                    functionInstance.SetFunctionName(fieldName);
+                }
+            }
+
+            if (fieldName is PrivateName privateName)
+            {
+                receiver.PrivateFieldAdd(privateName, initValue);
+            }
+            else
+            {
+                receiver.CreateDataPropertyOrThrow(fieldName, initValue);
+            }
+        }
+
+        internal enum IntegrityLevel
+        {
+            Sealed,
+            Frozen
+        }
+
+        private sealed class ObjectInstanceDebugView
+        {
+            private readonly ObjectInstance _obj;
+
+            public ObjectInstanceDebugView(ObjectInstance obj)
+            {
+                _obj = obj;
+            }
+
+            public ObjectInstance? Prototype => _obj.Prototype;
+
+            [DebuggerBrowsable(DebuggerBrowsableState.RootHidden)]
+            public KeyValuePair<JsValue, JsValue>[] Entries
+            {
+                get
+                {
+                    var keys = new KeyValuePair<JsValue, JsValue>[(_obj._properties?.Count ?? 0) + (_obj._symbols?.Count ?? 0)];
+
+                    var i = 0;
+                    if (_obj._properties is not null)
+                    {
+                        foreach (var key in _obj._properties)
+                        {
+                            keys[i++] = new KeyValuePair<JsValue, JsValue>(key.Key.Name, UnwrapJsValue(key.Value, _obj));
+                        }
+                    }
+                    if (_obj._symbols is not null)
+                    {
+                        foreach (var key in _obj._symbols)
+                        {
+                            keys[i++] = new KeyValuePair<JsValue, JsValue>(key.Key, UnwrapJsValue(key.Value, _obj));
+                        }
+                    }
+                    return keys;
+                }
+            }
+
+            private string DebugToString() => new JsonSerializer(_obj._engine).Serialize(_obj, Undefined, "  ").ToString();
         }
     }
 }

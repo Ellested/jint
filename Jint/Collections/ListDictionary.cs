@@ -1,5 +1,6 @@
+#nullable disable
+
 using System.Collections;
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using Jint.Runtime;
 
@@ -16,7 +17,7 @@ namespace Jint.Collections
             _checkExistingKeys = checkExistingKeys;
             _head = new DictionaryNode
             {
-                Key = key, 
+                Key = key,
                 Value = value
             };
             _count = 1;
@@ -74,13 +75,31 @@ namespace Jint.Collections
             return false;
         }
 
+        public void SetOrUpdateValue<TState>(Key key, Func<TValue, TState, TValue> updater, TState state)
+        {
+            DictionaryNode last = null;
+            DictionaryNode node;
+            for (node = _head; node != null; node = node.Next)
+            {
+                if (node.Key == key)
+                {
+                    node.Value = updater(node.Value, state);
+                    return;
+                }
+
+                last = node;
+            }
+
+            AddNode(key, updater(default, state), last);
+        }
+
         public int Count
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get => _count;
         }
 
-        public void Add(Key key, TValue value)
+        public bool Add(Key key, TValue value, bool tryAdd = false)
         {
             DictionaryNode last = null;
             DictionaryNode node;
@@ -90,6 +109,10 @@ namespace Jint.Collections
                 var oldKey = node.Key;
                 if (checkExistingKeys && oldKey == key)
                 {
+                    if (tryAdd)
+                    {
+                        return false;
+                    }
                     ExceptionHelper.ThrowArgumentException();
                 }
 
@@ -97,6 +120,7 @@ namespace Jint.Collections
             }
 
             AddNode(key, value, last);
+            return true;
         }
 
         private void AddNode(Key key, TValue value, DictionaryNode last)
@@ -233,7 +257,7 @@ namespace Jint.Collections
             object IEnumerator.Current => _current;
         }
 
-        internal class DictionaryNode
+        internal sealed class DictionaryNode
         {
             public Key Key;
             public TValue Value;

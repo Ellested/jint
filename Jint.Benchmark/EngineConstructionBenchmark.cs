@@ -1,25 +1,36 @@
 ﻿using BenchmarkDotNet.Attributes;
 using Esprima;
 using Esprima.Ast;
+using Jint.Native;
 
-namespace Jint.Benchmark
+namespace Jint.Benchmark;
+
+[MemoryDiagnoser]
+public class EngineConstructionBenchmark
 {
-    [MemoryDiagnoser]
-    public class EngineConstructionBenchmark
+    private Script _program;
+    private Script _simple;
+
+    [GlobalSetup]
+    public void GlobalSetup()
     {
-        private readonly Script _program;
+        var parser = new JavaScriptParser();
+        _program = parser.ParseScript("([].length + ''.length)");
+        _simple = parser.ParseScript("1");
+        new Engine().Evaluate(_program);
+    }
 
-        public EngineConstructionBenchmark()
-        {
-            var parser = new JavaScriptParser("return [].length + ''.length");
-            _program = parser.ParseScript();
-        }
+    [Benchmark]
+    public Engine BuildEngine()
+    {
+        var engine = new Engine();
+        return engine;
+    }
 
-        [Benchmark]
-        public double BuildEngine()
-        {
-            var engine = new Engine();
-            return engine.Execute(_program).GetCompletionValue().AsNumber();
-        }
+    [Benchmark]
+    public JsValue EvaluateSimple()
+    {
+        var engine = new Engine();
+        return engine.Evaluate(_simple);
     }
 }

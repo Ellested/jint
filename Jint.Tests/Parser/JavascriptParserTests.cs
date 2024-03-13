@@ -1,9 +1,6 @@
-﻿using System;
-using System.Linq;
-using Esprima;
+﻿using Esprima;
 using Esprima.Ast;
 using Jint.Runtime;
-using Xunit;
 
 namespace Jint.Tests.Parser
 {
@@ -12,7 +9,7 @@ namespace Jint.Tests.Parser
         [Fact]
         public void ShouldParseThis()
         {
-            var program = new JavaScriptParser("this").ParseScript();
+            var program = new JavaScriptParser().ParseScript("this");
             var body = program.Body;
 
             Assert.Single(body);
@@ -22,7 +19,7 @@ namespace Jint.Tests.Parser
         [Fact]
         public void ShouldParseNull()
         {
-            var program = new JavaScriptParser("null").ParseScript();
+            var program = new JavaScriptParser().ParseScript("null");
             var body = program.Body;
 
             Assert.Single(body);
@@ -34,10 +31,10 @@ namespace Jint.Tests.Parser
         [Fact]
         public void ShouldParseNumeric()
         {
-            var program = new JavaScriptParser(
-                @"
+            var code = @"
                 42
-            ").ParseScript();
+            ";
+            var program = new JavaScriptParser().ParseScript(code);
             var body = program.Body;
 
             Assert.Single(body);
@@ -51,7 +48,7 @@ namespace Jint.Tests.Parser
         {
             BinaryExpression binary;
 
-            var program = new JavaScriptParser("(1 + 2 ) * 3").ParseScript();
+            var program = new JavaScriptParser().ParseScript("(1 + 2 ) * 3");
             var body = program.Body;
 
             Assert.Single(body);
@@ -83,11 +80,11 @@ namespace Jint.Tests.Parser
         [InlineData(10, "0012")]
         [InlineData(1.189008226412092e+38, "0x5973772948c653ac1971f1576e03c4d4")]
         [InlineData(18446744073709552000d, "0xffffffffffffffff")]
-        public void ShouldParseNumericLiterals(object expected, string source)
+        public void ShouldParseNumericLiterals(object expected, string code)
         {
             Literal literal;
 
-            var program = new JavaScriptParser(source).ParseScript();
+            var program = new JavaScriptParser().ParseScript(code);
             var body = program.Body;
 
             Assert.Single(body);
@@ -102,11 +99,11 @@ namespace Jint.Tests.Parser
         [InlineData("\x61", @"'\x61'")]
         [InlineData("Hello\nworld", @"'Hello\nworld'")]
         [InlineData("Hello\\\nworld", @"'Hello\\\nworld'")]
-        public void ShouldParseStringLiterals(string expected, string source)
+        public void ShouldParseStringLiterals(string expected, string code)
         {
             Literal literal;
 
-            var program = new JavaScriptParser(source).ParseScript();
+            var program = new JavaScriptParser().ParseScript(code);
             var body = program.Body;
 
             Assert.Single(body);
@@ -147,19 +144,19 @@ namespace Jint.Tests.Parser
         [InlineData(@"{ throw error/* Multiline
                       Comment */error; }")]
 
-        public void ShouldInsertSemicolons(string source)
+        public void ShouldInsertSemicolons(string code)
         {
-            new JavaScriptParser(source).ParseScript();
+            new JavaScriptParser().ParseScript(code);
         }
 
         [Fact]
         public void ShouldProvideLocationForMultiLinesStringLiterals()
         {
-            var source = @"'\
+            const string Code = @"'\
 \
 '
 ";
-            var program = new JavaScriptParser(source, new ParserOptions { Loc = true }).ParseScript();
+            var program = new JavaScriptParser(new ParserOptions()).ParseScript(Code);
             var expr = program.Body.First().As<ExpressionStatement>().Expression;
             Assert.Equal(1, expr.Location.Start.Line);
             Assert.Equal(0, expr.Location.Start.Column);
@@ -181,7 +178,7 @@ namespace Jint.Tests.Parser
         [InlineData("-.-")]
         public void ShouldThrowParserExceptionForInvalidCode(string code)
         {
-            Assert.Throws<ParserException>(() => new JavaScriptParser(code).ParseScript());
+            Assert.Throws<ParserException>(() => new JavaScriptParser().ParseScript(code));
         }
     }
 }

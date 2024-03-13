@@ -1,30 +1,36 @@
 using Esprima.Ast;
+using Jint.Native;
 using Jint.Native.Function;
-using Jint.Runtime.Environments;
 
-namespace Jint.Runtime.Interpreter.Expressions
+namespace Jint.Runtime.Interpreter.Expressions;
+
+internal sealed class JintArrowFunctionExpression : JintExpression
 {
-    internal sealed class JintArrowFunctionExpression : JintExpression
+    private readonly JintFunctionDefinition _function;
+
+    public JintArrowFunctionExpression(ArrowFunctionExpression function) : base(function)
     {
-        private readonly JintFunctionDefinition _function;
+        _function = new JintFunctionDefinition(function);
+    }
 
-        public JintArrowFunctionExpression(Engine engine, IFunction function)
-            : base(engine, ArrowParameterPlaceHolder.Empty)
+    protected override object EvaluateInternal(EvaluationContext context)
+    {
+        var engine = context.Engine;
+        var env = engine.ExecutionContext.LexicalEnvironment;
+        var privateEnv = engine.ExecutionContext.PrivateEnvironment;
+
+        var closure = engine.Realm.Intrinsics.Function.OrdinaryFunctionCreate(
+            engine.Realm.Intrinsics.Function.PrototypeObject,
+            _function,
+            FunctionThisMode.Lexical,
+            env,
+            privateEnv);
+
+        if (_function.Name is null)
         {
-            _function = new JintFunctionDefinition(engine, function);
+            closure.SetFunctionName(JsString.Empty);
         }
 
-        protected override object EvaluateInternal()
-        {
-            var funcEnv = LexicalEnvironment.NewDeclarativeEnvironment(_engine, _engine.ExecutionContext.LexicalEnvironment);
-
-            var closure = new ArrowFunctionInstance(
-                _engine,
-                _function,
-                funcEnv,
-                _function.Strict);
-
-            return closure;
-        }
+        return closure;
     }
 }

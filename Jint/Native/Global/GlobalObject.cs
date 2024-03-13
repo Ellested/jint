@@ -1,123 +1,49 @@
-﻿using System;
-using System.Collections.Generic;
+using System.Buffers;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
-using Jint.Collections;
+using Esprima;
 using Jint.Native.Object;
 using Jint.Native.String;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
-using Jint.Runtime.Descriptors.Specialized;
-using Jint.Runtime.Interop;
 
 namespace Jint.Native.Global
 {
-    public sealed class GlobalObject : ObjectInstance
+    public sealed partial class GlobalObject : ObjectInstance
     {
-        private readonly StringBuilder _stringBuilder = new StringBuilder();
+        private readonly Realm _realm;
+        private readonly StringBuilder _stringBuilder = new();
 
-        private GlobalObject(Engine engine) : base(engine)
+        internal GlobalObject(
+            Engine engine,
+            Realm realm) : base(engine, ObjectClass.Object, InternalTypes.Object | InternalTypes.PlainObject)
         {
+            _realm = realm;
         }
 
-        public static GlobalObject CreateGlobalObject(Engine engine)
+        private JsValue ToStringString(JsValue thisObject, JsValue[] arguments)
         {
-            return new GlobalObject(engine);
-        }
-
-        protected override void Initialize()
-        {
-            const PropertyFlag lengthFlags = PropertyFlag.Configurable;
-            const PropertyFlag propertyFlags = PropertyFlag.Configurable | PropertyFlag.Writable;
-            var properties = new PropertyDictionary(40, checkExistingKeys: false)
-            {
-                ["Object"] = new PropertyDescriptor(Engine.Object, propertyFlags),
-                ["Function"] = new PropertyDescriptor(Engine.Function, propertyFlags),
-                ["Symbol"] = new PropertyDescriptor(Engine.Symbol, propertyFlags),
-                ["Array"] = new PropertyDescriptor(Engine.Array, propertyFlags),
-                ["Map"] = new PropertyDescriptor(Engine.Map, propertyFlags),
-                ["Set"] = new PropertyDescriptor(Engine.Set, propertyFlags),
-                ["String"] = new PropertyDescriptor(Engine.String, propertyFlags),
-                ["RegExp"] = new PropertyDescriptor(Engine.RegExp, propertyFlags),
-                ["Number"] = new PropertyDescriptor(Engine.Number, propertyFlags),
-                ["Boolean"] = new PropertyDescriptor(Engine.Boolean, propertyFlags),
-                ["Date"] = new PropertyDescriptor(Engine.Date, propertyFlags),
-                ["Math"] = new PropertyDescriptor(Engine.Math, propertyFlags),
-                ["JSON"] = new PropertyDescriptor(Engine.Json, propertyFlags),
-                ["Error"] = new LazyPropertyDescriptor(() => Engine.Error, propertyFlags),
-                ["EvalError"] = new LazyPropertyDescriptor(() => Engine.EvalError, propertyFlags),
-                ["Proxy"] = new LazyPropertyDescriptor(() => Engine.Proxy, propertyFlags),
-                ["RangeError"] = new LazyPropertyDescriptor(() => Engine.RangeError, propertyFlags),
-                ["ReferenceError"] = new LazyPropertyDescriptor(() => Engine.ReferenceError, propertyFlags),
-                ["Reflect"] = new LazyPropertyDescriptor(() => Engine.Reflect, propertyFlags),
-                ["SyntaxError"] = new LazyPropertyDescriptor(() => Engine.SyntaxError, propertyFlags),
-                ["TypeError"] = new LazyPropertyDescriptor(() => Engine.TypeError, propertyFlags),
-                ["URIError"] = new LazyPropertyDescriptor(() => Engine.UriError, propertyFlags),
-                ["NaN"] = new PropertyDescriptor(double.NaN, PropertyFlag.None),
-                ["Infinity"] = new PropertyDescriptor(double.PositiveInfinity, PropertyFlag.None),
-                ["undefined"] = new PropertyDescriptor(Undefined, PropertyFlag.None),
-                ["parseInt"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "parseInt", ParseInt, 2, lengthFlags), propertyFlags),
-                ["parseFloat"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "parseFloat", ParseFloat, 1, lengthFlags), propertyFlags),
-                ["isNaN"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "isNaN", IsNaN, 1, lengthFlags), propertyFlags),
-                ["isFinite"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "isFinite", IsFinite, 1, lengthFlags), propertyFlags),
-                ["decodeURI"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "decodeURI", DecodeUri, 1, lengthFlags), propertyFlags),
-                ["decodeURIComponent"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "decodeURIComponent", DecodeUriComponent, 1, lengthFlags), propertyFlags),
-                ["encodeURI"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "encodeURI", EncodeUri, 1, lengthFlags), propertyFlags),
-                ["encodeURIComponent"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "encodeURIComponent", EncodeUriComponent, 1, lengthFlags), propertyFlags),
-                ["escape"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "escape", Escape, 1), propertyFlags),
-                ["unescape"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "unescape", Unescape, 1), propertyFlags),
-                ["globalThis"] = new PropertyDescriptor(this, propertyFlags),
-
-                // toString is not mentioned or actually required in spec, but some tests rely on it
-                ["toString"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "toString", ToStringString, 1), propertyFlags)
-            };
-
-            SetProperties(properties);
-        }
-
-        private JsValue ToStringString(JsValue thisObj, JsValue[] arguments)
-        {
-            return _engine.Object.PrototypeObject.ToObjectString(thisObj, Arguments.Empty);
+            return _realm.Intrinsics.Object.PrototypeObject.ToObjectString(thisObject, Arguments.Empty);
         }
 
         /// <summary>
-        /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.1.2.2
+        /// https://tc39.es/ecma262/#sec-parseint-string-radix
         /// </summary>
-        public static JsValue ParseInt(JsValue thisObject, JsValue[] arguments)
+        internal static JsValue ParseInt(JsValue thisObject, JsValue[] arguments)
         {
-            string inputString = TypeConverter.ToString(arguments.At(0));
-            var s = StringPrototype.TrimEx(inputString);
+            var inputString = TypeConverter.ToString(arguments.At(0));
+            var trimmed = StringPrototype.TrimEx(inputString);
+            var s = trimmed.AsSpan();
 
-            var sign = 1;
-            if (!System.String.IsNullOrEmpty(s))
-            {
-                if (s[0] == '-')
-                {
-                    sign = -1;
-                }
-
-                if (s[0] == '-' || s[0] == '+')
-                {
-                    s = s.Substring(1);
-                }
-            }
+            var radix = arguments.Length > 1 ? TypeConverter.ToInt32(arguments[1]) : 0;
+            var hexStart = s.Length > 1 && trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
 
             var stripPrefix = true;
-
-            int radix = arguments.Length > 1 ? TypeConverter.ToInt32(arguments[1]) : 0;
-
             if (radix == 0)
             {
-                if (s.Length >= 2 && s.StartsWith("0x") || s.StartsWith("0X"))
-                {
-                    radix = 16;
-                }
-                else
-                {
-                    radix = 10;
-                }
+                radix = hexStart ? 16 : 10;
             }
             else if (radix < 2 || radix > 36)
             {
@@ -128,225 +54,210 @@ namespace Jint.Native.Global
                 stripPrefix = false;
             }
 
-            if (stripPrefix && s.Length >= 2 && s.StartsWith("0x") || s.StartsWith("0X"))
+            // check fast case
+            if (radix == 10 && int.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number))
             {
-                s = s.Substring(2);
+                return JsNumber.Create(number);
             }
 
-            try
+            var sign = 1;
+            if (s.Length > 0)
             {
-                return sign * Parse(s, radix);
-            }
-            catch
-            {
-                return JsNumber.DoubleNaN;
+                var c = s[0];
+                if (c == '-')
+                {
+                    sign = -1;
+                }
+
+                if (c is '-' or '+')
+                {
+                    s = s.Slice(1);
+                }
             }
 
-        }
+            if (stripPrefix && hexStart)
+            {
+                s = s.Slice(2);
+            }
 
-        private static double Parse(string number, int radix)
-        {
-            if (number == "")
+            if (s.Length == 0)
             {
                 return double.NaN;
             }
 
+            var hasResult = false;
             double result = 0;
             double pow = 1;
-            for (int i = number.Length - 1; i >= 0; i--)
+            for (var i = s.Length - 1; i >= 0; i--)
             {
-                double index = double.NaN;
-                char digit = number[i];
+                var digit = s[i];
 
-                if (digit >= '0' && digit <= '9')
+                var index = digit switch
                 {
-                    index = digit - '0';
-                }
-                else if (digit >= 'a' && digit <= 'z')
-                {
-                    index = digit - 'a' + 10;
-                }
-                else if (digit >= 'A' && digit <= 'Z')
-                {
-                    index = digit - 'A' + 10;
-                }
+                    >= '0' and <= '9' => digit - '0',
+                    >= 'a' and <= 'z' => digit - 'a' + 10,
+                    >= 'A' and <= 'Z' => digit - 'A' + 10,
+                    _ => -1
+                };
 
-                if (double.IsNaN(index) || index >= radix)
+                if (index == -1 || index >= radix)
                 {
-                    return Parse(number.Substring(0, i), radix);
+                    // reset
+                    hasResult = false;
+                    result = 0;
+                    pow = 1;
+                    continue;
                 }
 
+                hasResult = true;
                 result += index * pow;
-                pow = pow * radix;
+                pow *= radix;
             }
 
-            return result;
+            return hasResult ? JsNumber.Create(sign  * result) : JsNumber.DoubleNaN;
         }
 
         /// <summary>
-        /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.1.2.3
+        /// https://tc39.es/ecma262/#sec-parsefloat-string
         /// </summary>
-        public static JsValue ParseFloat(JsValue thisObject, JsValue[] arguments)
+        internal static JsValue ParseFloat(JsValue thisObject, JsValue[] arguments)
         {
             var inputString = TypeConverter.ToString(arguments.At(0));
             var trimmedString = StringPrototype.TrimStartEx(inputString);
 
-            var sign = 1;
-            if (trimmedString.Length > 0)
+            if (string.IsNullOrWhiteSpace(trimmedString))
+            {
+                return JsNumber.DoubleNaN;
+            }
+
+            // start of string processing
+            var i = 0;
+
+            // check known string constants
+            if (!char.IsDigit(trimmedString[0]))
             {
                 if (trimmedString[0] == '-')
                 {
-                    sign = -1;
-                    trimmedString = trimmedString.Substring(1);
+                    i++;
+                    if (trimmedString.Length > 1 && trimmedString[1] == 'I' && trimmedString.StartsWith("-Infinity", StringComparison.Ordinal))
+                    {
+                        return JsNumber.DoubleNegativeInfinity;
+                    }
                 }
-                else if (trimmedString[0] == '+')
+
+                if (trimmedString[0] == '+')
                 {
-                    trimmedString = trimmedString.Substring(1);
+                    i++;
+                    if (trimmedString.Length > 1 && trimmedString[1] == 'I' && trimmedString.StartsWith("+Infinity", StringComparison.Ordinal))
+                    {
+                        return JsNumber.DoublePositiveInfinity;
+                    }
+                }
+
+                if (trimmedString.StartsWith("Infinity", StringComparison.Ordinal))
+                {
+                    return JsNumber.DoublePositiveInfinity;
+                }
+
+                if (trimmedString.StartsWith("NaN", StringComparison.Ordinal))
+                {
+                    return JsNumber.DoubleNaN;
                 }
             }
 
-            if (trimmedString.StartsWith("Infinity"))
-            {
-                return sign * double.PositiveInfinity;
-            }
+            // find the starting part of string  that is still acceptable JS number
 
-            if (trimmedString.StartsWith("NaN"))
-            {
-                return JsNumber.DoubleNaN;
-            }
-
-            var separator = (char)0;
-
-            bool isNan = true;
-            decimal number = 0;
-            var i = 0;
-            for (; i < trimmedString.Length; i++)
+            var dotFound = false;
+            var exponentFound = false;
+            while (i < trimmedString.Length)
             {
                 var c = trimmedString[i];
+
+                if (Character.IsDecimalDigit(c))
+                {
+                    i++;
+                    continue;
+                }
+
                 if (c == '.')
                 {
+                    if (dotFound)
+                    {
+                        // does not look right
+                        break;
+                    }
+
                     i++;
-                    separator = '.';
-                    break;
+                    dotFound = true;
+                    continue;
                 }
 
-                if (c == 'e' || c == 'E')
+                if (c is 'e' or 'E')
                 {
+                    if (exponentFound)
+                    {
+                        // does not look right
+                        break;
+                    }
+
                     i++;
-                    separator = 'e';
-                    break;
+                    exponentFound = true;
+                    continue;
                 }
 
-                var digit = c - '0';
+                if (c is '+' or '-' && trimmedString[i - 1] is 'e' or 'E')
+                {
+                    // ok
+                    i++;
+                    continue;
+                }
 
-                if (digit >= 0 && digit <= 9)
-                {
-                    isNan = false;
-                    number = number * 10 + digit;
-                }
-                else
-                {
-                    break;
-                }
+                break;
             }
 
-            decimal pow = 0.1m;
-
-            if (separator == '.')
+            while (exponentFound && i > 0 && !Character.IsDecimalDigit(trimmedString[i - 1]))
             {
-                for (; i < trimmedString.Length; i++)
-                {
-                    var c = trimmedString[i];
-
-                    var digit = c - '0';
-
-                    if (digit >= 0 && digit <= 9)
-                    {
-                        isNan = false;
-                        number += digit * pow;
-                        pow *= 0.1m;
-                    }
-                    else if (c == 'e' || c == 'E')
-                    {
-                        i++;
-                        separator = 'e';
-                        break;
-                    }
-                    else
-                    {
-                        break;
-                    }
-                }
+                // we are missing required exponent number part info
+                i--;
             }
 
-            var exp = 0;
-            var expSign = 1;
+            // we should now have proper input part
 
-            if (separator == 'e')
+#if SUPPORTS_SPAN_PARSE
+            var substring = trimmedString.AsSpan(0, i);
+#else
+            var substring = trimmedString.Substring(0, i);
+#endif
+
+            const NumberStyles Styles = NumberStyles.AllowDecimalPoint | NumberStyles.AllowExponent | NumberStyles.AllowLeadingSign;
+            if (double.TryParse(substring, Styles, CultureInfo.InvariantCulture, out var d))
             {
-                if (i < trimmedString.Length)
-                {
-                    if (trimmedString[i] == '-')
-                    {
-                        expSign = -1;
-                        i++;
-                    }
-                    else if (trimmedString[i] == '+')
-                    {
-                        i++;
-                    }
-                }
-
-                for (; i < trimmedString.Length; i++)
-                {
-                    var c = trimmedString[i];
-
-                    var digit = c - '0';
-
-                    if (digit >= 0 && digit <= 9)
-                    {
-                        exp = exp * 10 + digit;
-                    }
-                    else
-                    {
-                        break;
-                    }
-                }
+                return d;
             }
 
-            if (isNan)
-            {
-                return JsNumber.DoubleNaN;
-            }
-
-            for (var k = 1; k <= exp; k++)
-            {
-                if (expSign > 0)
-                {
-                    number *= 10;
-                }
-                else
-                {
-                    number /= 10;
-                }
-            }
-
-            return (double)(sign * number);
+            return JsNumber.DoubleNaN;
         }
 
         /// <summary>
         /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.1.2.4
         /// </summary>
-        public static JsValue IsNaN(JsValue thisObject, JsValue[] arguments)
+        private static JsValue IsNaN(JsValue thisObject, JsValue[] arguments)
         {
-            var x = TypeConverter.ToNumber(arguments.At(0));
+            var value = arguments.At(0);
+
+            if (ReferenceEquals(value, JsNumber.DoubleNaN))
+            {
+                return true;
+            }
+
+            var x = TypeConverter.ToNumber(value);
             return double.IsNaN(x);
         }
 
         /// <summary>
         /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.1.2.5
         /// </summary>
-        public static JsValue IsFinite(JsValue thisObject, JsValue[] arguments)
+        private static JsValue IsFinite(JsValue thisObject, JsValue[] arguments)
         {
             if (arguments.Length != 1)
             {
@@ -362,34 +273,22 @@ namespace Jint.Native.Global
             return true;
         }
 
-        private static readonly HashSet<char> UriReserved = new HashSet<char>
-        {
-            ';', '/', '?', ':', '@', '&', '=', '+', '$', ','
-        };
-
-        private static readonly HashSet<char> UriUnescaped = new HashSet<char>
-        {
-            'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
-            'w', 'x', 'y', 'z', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
-            'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-', '_', '.', '!',
-            '~', '*', '\'', '(', ')'
-        };
-
-        private static readonly HashSet<char> UnescapedUriSet = new HashSet<char>(UriReserved.Concat(UriUnescaped).Concat(new[] { '#' }));
-        private static readonly HashSet<char> ReservedUriSet = new HashSet<char>(UriReserved.Concat(new[] { '#' }));
-
-        private const string HexaMap = "0123456789ABCDEF";
+        private const string UriReservedString = ";/?:@&=+$,";
+        private const string UriUnescapedString = "-_.!~*'()";
+        private static readonly SearchValues<char> UriUnescaped = SearchValues.Create(UriUnescapedString);
+        private static readonly SearchValues<char> UnescapedUriSet = SearchValues.Create(UriReservedString + UriUnescapedString + '#');
+        private static readonly SearchValues<char> ReservedUriSet = SearchValues.Create(UriReservedString + '#');
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool IsValidHexaChar(char c) => Uri.IsHexDigit(c);
-        
+
         /// <summary>
         /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.1.3.2
         /// </summary>
         /// <param name="thisObject"></param>
         /// <param name="arguments"></param>
         /// <returns></returns>
-        public JsValue EncodeUri(JsValue thisObject, JsValue[] arguments)
+        private JsValue EncodeUri(JsValue thisObject, JsValue[] arguments)
         {
             var uriString = TypeConverter.ToString(arguments.At(0));
 
@@ -403,24 +302,27 @@ namespace Jint.Native.Global
         /// <param name="thisObject"></param>
         /// <param name="arguments"></param>
         /// <returns></returns>
-        public JsValue EncodeUriComponent(JsValue thisObject, JsValue[] arguments)
+        private JsValue EncodeUriComponent(JsValue thisObject, JsValue[] arguments)
         {
             var uriString = TypeConverter.ToString(arguments.At(0));
 
             return Encode(uriString, UriUnescaped);
         }
 
-        private string Encode(string uriString, HashSet<char> unescapedUriSet)
+        private JsValue Encode(string uriString, SearchValues<char> unescapedUriSet)
         {
+            const string HexaMap = "0123456789ABCDEF";
+
             var strLen = uriString.Length;
 
             _stringBuilder.EnsureCapacity(uriString.Length);
             _stringBuilder.Clear();
+            Span<byte> buffer = stackalloc byte[4];
 
             for (var k = 0; k < strLen; k++)
             {
                 var c = uriString[k];
-                if (unescapedUriSet != null && unescapedUriSet.Contains(c))
+                if (c is >= 'a' and <= 'z' || c is >= 'A' and <= 'Z' || c is >= '0' and <= '9' || unescapedUriSet.Contains(c))
                 {
                     _stringBuilder.Append(c);
                 }
@@ -428,7 +330,7 @@ namespace Jint.Native.Global
                 {
                     if (c >= 0xDC00 && c <= 0xDBFF)
                     {
-                        ExceptionHelper.ThrowUriError(_engine);
+                        goto uriError;
                     }
 
                     int v;
@@ -441,103 +343,98 @@ namespace Jint.Native.Global
                         k++;
                         if (k == strLen)
                         {
-                            ExceptionHelper.ThrowUriError(_engine);
+                            goto uriError;
                         }
 
-                        var kChar = (int)uriString[k];
-                        if (kChar < 0xDC00 || kChar > 0xDFFF)
+                        var kChar = (int) uriString[k];
+                        if (kChar is < 0xDC00 or > 0xDFFF)
                         {
-                            ExceptionHelper.ThrowUriError(_engine);
+                            goto uriError;
                         }
 
                         v = (c - 0xD800) * 0x400 + (kChar - 0xDC00) + 0x10000;
                     }
 
-                    byte[] octets = System.Array.Empty<byte>();
-
-                    if (v >= 0 && v <= 0x007F)
+                    var length = 1;
+                    switch (v)
                     {
-                        // 00000000 0zzzzzzz -> 0zzzzzzz
-                        octets = new[] { (byte)v };
-                    }
-                    else if (v <= 0x07FF)
-                    {
-                        // 00000yyy yyzzzzzz ->	110yyyyy ; 10zzzzzz
-                        octets = new[]
-                        {
-                            (byte)(0xC0 | (v >> 6)),
-                            (byte)(0x80 | (v & 0x3F))
-                        };
-                    }
-                    else if (v <= 0xD7FF)
-                    {
-                        // xxxxyyyy yyzzzzzz -> 1110xxxx; 10yyyyyy; 10zzzzzz
-                        octets = new[]
-                        {
-                            (byte)(0xE0 | (v >> 12)),
-                            (byte)(0x80 | ((v >> 6) & 0x3F)),
-                            (byte)(0x80 | (v & 0x3F))
-                        };
-                    }
-                    else if (v <= 0xDFFF)
-                    {
-                        ExceptionHelper.ThrowUriError(_engine);
-                    }
-                    else if (v <= 0xFFFF)
-                    {
-                        octets = new[]
-                        {
-                            (byte) (0xE0 | (v >> 12)),
-                            (byte) (0x80 | ((v >> 6) & 0x3F)),
-                            (byte) (0x80 | (v & 0x3F))
-                        };
-                    }
-                    else
-                    {
-                        octets = new[]
-                        {
-                            (byte) (0xF0 | (v >> 18)),
-                            (byte) (0x80 | (v >> 12 & 0x3F)),
-                            (byte) (0x80 | (v >> 6 & 0x3F)),
-                            (byte) (0x80 | (v >> 0 & 0x3F))
-                        };
+                        case >= 0 and <= 0x007F:
+                            // 00000000 0zzzzzzz -> 0zzzzzzz
+                            buffer[0] = (byte) v;
+                            break;
+                        case <= 0x07FF:
+                            // 00000yyy yyzzzzzz ->	110yyyyy ; 10zzzzzz
+                            length = 2;
+                            buffer[0] = (byte) (0xC0 | (v >> 6));
+                            buffer[1] = (byte) (0x80 | (v & 0x3F));
+                            break;
+                        case <= 0xD7FF:
+                            // xxxxyyyy yyzzzzzz -> 1110xxxx; 10yyyyyy; 10zzzzzz
+                            length = 3;
+                            buffer[0] = (byte) (0xE0 | (v >> 12));
+                            buffer[1] = (byte) (0x80 | ((v >> 6) & 0x3F));
+                            buffer[2] = (byte) (0x80 | (v & 0x3F));
+                            break;
+                        case <= 0xDFFF:
+                            goto uriError;
+                        case <= 0xFFFF:
+                            length = 3;
+                            buffer[0] = (byte) (0xE0 | (v >> 12));
+                            buffer[1] = (byte) (0x80 | ((v >> 6) & 0x3F));
+                            buffer[2] = (byte) (0x80 | (v & 0x3F));
+                            break;
+                        default:
+                            length = 4;
+                            buffer[0] = (byte) (0xF0 | (v >> 18));
+                            buffer[1] = (byte) (0x80 | (v >> 12 & 0x3F));
+                            buffer[2] = (byte) (0x80 | (v >> 6 & 0x3F));
+                            buffer[3] = (byte) (0x80 | (v >> 0 & 0x3F));
+                            break;
                     }
 
-                    for (var j = 0; j < octets.Length; j++)
+                    for (var i = 0; i < length; i++)
                     {
-                        var jOctet = octets[j];
-                        var x1 = HexaMap[jOctet / 16];
-                        var x2 = HexaMap[jOctet % 16];
+                        var octet = buffer[i];
+                        var x1 = HexaMap[octet / 16];
+                        var x2 = HexaMap[octet % 16];
                         _stringBuilder.Append('%').Append(x1).Append(x2);
                     }
                 }
             }
 
             return _stringBuilder.ToString();
+
+uriError:
+            _engine.SignalError(ExceptionHelper.CreateUriError(_realm, "URI malformed"));
+            return JsEmpty.Instance;
         }
 
-        public JsValue DecodeUri(JsValue thisObject, JsValue[] arguments)
+        private JsValue DecodeUri(JsValue thisObject, JsValue[] arguments)
         {
             var uriString = TypeConverter.ToString(arguments.At(0));
 
             return Decode(uriString, ReservedUriSet);
         }
 
-        public JsValue DecodeUriComponent(JsValue thisObject, JsValue[] arguments)
+        private JsValue DecodeUriComponent(JsValue thisObject, JsValue[] arguments)
         {
             var componentString = TypeConverter.ToString(arguments.At(0));
 
             return Decode(componentString, null);
         }
 
-        private string Decode(string uriString, HashSet<char> reservedSet)
+        private JsValue Decode(string uriString, SearchValues<char>? reservedSet)
         {
             var strLen = uriString.Length;
 
             _stringBuilder.EnsureCapacity(strLen);
             _stringBuilder.Clear();
 
-            var octets = System.Array.Empty<byte>();
+#if SUPPORTS_SPAN_PARSE
+            Span<byte> octets = stackalloc byte[4];
+#else
+            var octets = new byte[4];
+#endif
 
             for (var k = 0; k < strLen; k++)
             {
@@ -551,21 +448,25 @@ namespace Jint.Native.Global
                     var start = k;
                     if (k + 2 >= strLen)
                     {
-                        ExceptionHelper.ThrowUriError(_engine);
+                        goto uriError;
                     }
 
-                    if (!IsValidHexaChar(uriString[k + 1]) || !IsValidHexaChar(uriString[k + 2]))
+                    var c1 = uriString[k + 1];
+                    var c2 = uriString[k + 2];
+                    if (!IsValidHexaChar(c1) || !IsValidHexaChar(c2))
                     {
-                        ExceptionHelper.ThrowUriError(_engine);
+                        goto uriError;
                     }
 
-                    var B = Convert.ToByte(uriString[k + 1].ToString() + uriString[k + 2], 16);
+                    var B = StringToIntBase16(uriString.AsSpan(k + 1, 2));
 
                     k += 2;
                     if ((B & 0x80) == 0)
                     {
                         C = (char)B;
+#pragma warning disable CA2249
                         if (reservedSet == null || !reservedSet.Contains(C))
+#pragma warning restore CA2249
                         {
                             _stringBuilder.Append(C);
                         }
@@ -577,22 +478,20 @@ namespace Jint.Native.Global
                     else
                     {
                         var n = 0;
-                        for (; ((B << n) & 0x80) != 0; n++) ;
+                        for (; ((B << n) & 0x80) != 0; n++)
+                        {
+                        }
 
                         if (n == 1 || n > 4)
                         {
-                            ExceptionHelper.ThrowUriError(_engine);
+                            goto uriError;
                         }
-
-                        octets = octets.Length == n
-                            ? octets
-                            : new byte[n];
 
                         octets[0] = B;
 
                         if (k + (3 * (n - 1)) >= strLen)
                         {
-                            ExceptionHelper.ThrowUriError(_engine);
+                            goto uriError;
                         }
 
                         for (var j = 1; j < n; j++)
@@ -600,20 +499,22 @@ namespace Jint.Native.Global
                             k++;
                             if (uriString[k] != '%')
                             {
-                                ExceptionHelper.ThrowUriError(_engine);
+                                goto uriError;
                             }
 
-                            if (!IsValidHexaChar(uriString[k + 1]) || !IsValidHexaChar(uriString[k + 2]))
+                            c1 = uriString[k + 1];
+                            c2 = uriString[k + 2];
+                            if (!IsValidHexaChar(c1) || !IsValidHexaChar(c2))
                             {
-                                ExceptionHelper.ThrowUriError(_engine);
+                                goto uriError;
                             }
 
-                            B = Convert.ToByte(uriString[k + 1].ToString() + uriString[k + 2], 16);
+                            B = StringToIntBase16(uriString.AsSpan(k + 1, 2));
 
                             // B & 11000000 != 10000000
                             if ((B & 0xC0) != 0x80)
                             {
-                                ExceptionHelper.ThrowUriError(_engine);
+                                goto uriError;
                             }
 
                             k += 2;
@@ -621,20 +522,82 @@ namespace Jint.Native.Global
                             octets[j] = B;
                         }
 
-                        _stringBuilder.Append(Encoding.UTF8.GetString(octets, 0, octets.Length));
+#if SUPPORTS_SPAN_PARSE
+                        _stringBuilder.Append(Encoding.UTF8.GetString(octets.Slice(0, n)));
+#else
+                        _stringBuilder.Append(Encoding.UTF8.GetString(octets, 0, n));
+#endif
                     }
                 }
             }
 
             return _stringBuilder.ToString();
+
+uriError:
+            _engine.SignalError(ExceptionHelper.CreateUriError(_realm, "URI malformed"));
+            return JsEmpty.Instance;
         }
+
+        private static byte StringToIntBase16(ReadOnlySpan<char> s)
+        {
+            var i = 0;
+            var length = s.Length;
+
+            if (s[i] == '+')
+            {
+                i++;
+            }
+
+            if (i + 1 < length && s[i] == '0')
+            {
+                if (s[i + 1] == 'x' || s[i + 1] == 'X')
+                {
+                    i += 2;
+                }
+            }
+
+            uint result = 0;
+            while (i < s.Length && IsDigit(s[i], 16, out var value))
+            {
+                result = result * 16 + (uint) value;
+                i++;
+            }
+
+            return (byte) (int) result;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsDigit(char c, int radix, out int result)
+        {
+            int tmp;
+            if ((uint)(c - '0') <= 9)
+            {
+                result = tmp = c - '0';
+            }
+            else if ((uint)(c - 'A') <= 'Z' - 'A')
+            {
+                result = tmp = c - 'A' + 10;
+            }
+            else if ((uint)(c - 'a') <= 'z' - 'a')
+            {
+                result = tmp = c - 'a' + 10;
+            }
+            else
+            {
+                result = -1;
+                return false;
+            }
+
+            return tmp < radix;
+        }
+
+        private static readonly SearchValues<char> EscapeAllowList = SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@*_ + -./");
 
         /// <summary>
         /// http://www.ecma-international.org/ecma-262/5.1/#sec-B.2.1
         /// </summary>
-        public JsValue Escape(JsValue thisObject, JsValue[] arguments)
+        private JsValue Escape(JsValue thisObject, JsValue[] arguments)
         {
-            const string whiteList = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@*_ + -./";
             var uriString = TypeConverter.ToString(arguments.At(0));
 
             var strLen = uriString.Length;
@@ -645,17 +608,17 @@ namespace Jint.Native.Global
             for (var k = 0; k < strLen; k++)
             {
                 var c = uriString[k];
-                if (whiteList.IndexOf(c) != -1)
+                if (EscapeAllowList.Contains(c))
                 {
                     _stringBuilder.Append(c);
                 }
                 else if (c < 256)
                 {
-                    _stringBuilder.Append($"%{((int) c):X2}");
+                    _stringBuilder.Append('%').AppendFormat(CultureInfo.InvariantCulture, "{0:X2}", (int) c);
                 }
                 else
                 {
-                    _stringBuilder.Append($"%u{((int) c):X4}");
+                    _stringBuilder.Append("%u").AppendFormat(CultureInfo.InvariantCulture, "{0:X4}", (int) c);
                 }
             }
 
@@ -665,7 +628,7 @@ namespace Jint.Native.Global
         /// <summary>
         /// http://www.ecma-international.org/ecma-262/5.1/#sec-B.2.2
         /// </summary>
-        public JsValue Unescape(JsValue thisObject, JsValue[] arguments)
+        private JsValue Unescape(JsValue thisObject, JsValue[] arguments)
         {
             var uriString = TypeConverter.ToString(arguments.At(0));
 
@@ -679,22 +642,20 @@ namespace Jint.Native.Global
                 var c = uriString[k];
                 if (c == '%')
                 {
-                    if (k < strLen - 6
+                    if (k <= strLen - 6
                         && uriString[k + 1] == 'u'
                         && uriString.Skip(k + 2).Take(4).All(IsValidHexaChar))
                     {
-                        c = (char)int.Parse(
-                            string.Join(string.Empty, uriString.Skip(k + 2).Take(4)),
-                            NumberStyles.AllowHexSpecifier);
+                        var joined = string.Join(string.Empty, uriString.Skip(k + 2).Take(4));
+                        c = (char) int.Parse(joined, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture);
 
                         k += 5;
                     }
-                    else if (k < strLen - 3
-                        && uriString.Skip(k + 1).Take(2).All(IsValidHexaChar))
+                    else if (k <= strLen - 3
+                             && uriString.Skip(k + 1).Take(2).All(IsValidHexaChar))
                     {
-                        c = (char)int.Parse(
-                            string.Join(string.Empty, uriString.Skip(k + 1).Take(2)),
-                            NumberStyles.AllowHexSpecifier);
+                        var joined = string.Join(string.Empty, uriString.Skip(k + 1).Take(2));
+                        c = (char) int.Parse(joined, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture);
 
                         k += 2;
                     }
@@ -704,7 +665,7 @@ namespace Jint.Native.Global
 
             return _stringBuilder.ToString();
         }
-        
+
         // optimized versions with string parameter and without virtual dispatch for global environment usage
 
         internal bool HasProperty(Key property)
@@ -712,28 +673,16 @@ namespace Jint.Native.Global
             return GetOwnProperty(property) != PropertyDescriptor.Undefined;
         }
 
-        internal PropertyDescriptor GetProperty(Key property) => GetOwnProperty(property);
-
-        internal bool DefinePropertyOrThrow(Key property, PropertyDescriptor desc)
-        {
-            if (!DefineOwnProperty(property, desc))
-            {
-                ExceptionHelper.ThrowTypeError(_engine);
-            }
-
-            return true;
-        }
-
-        internal bool DefineOwnProperty(Key property, PropertyDescriptor desc)
+        private bool DefineOwnProperty(Key property, PropertyDescriptor desc)
         {
             var current = GetOwnProperty(property);
             if (current == desc)
             {
                 return true;
             }
-            
+
             // check fast path
-            if ((current._flags & PropertyFlag.MutableBinding) != 0)
+            if ((current._flags & PropertyFlag.MutableBinding) != PropertyFlag.None)
             {
                 current._value = desc.Value;
                 return true;
@@ -745,18 +694,22 @@ namespace Jint.Native.Global
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal PropertyDescriptor GetOwnProperty(Key property)
         {
-            Properties.TryGetValue(property, out var descriptor);
+            Properties!.TryGetValue(property, out var descriptor);
             return descriptor ?? PropertyDescriptor.Undefined;
         }
-        
-        internal bool Set(Key property, JsValue value)
+
+        internal bool SetFromMutableBinding(Key property, JsValue value, bool strict)
         {
             // here we are called only from global environment record context
             // we can take some shortcuts to be faster
 
-            if (!_properties.TryGetValue(property, out var existingDescriptor))
+            if (!_properties!.TryGetValue(property, out var existingDescriptor))
             {
-                _properties[property] = new PropertyDescriptor(value, PropertyFlag.ConfigurableEnumerableWritable);
+                if (strict)
+                {
+                    ExceptionHelper.ThrowReferenceNameError(_realm, property.Name);
+                }
+                _properties[property] = new PropertyDescriptor(value, PropertyFlag.ConfigurableEnumerableWritable | PropertyFlag.MutableBinding);
                 return true;
             }
 
@@ -768,7 +721,7 @@ namespace Jint.Native.Global
                 }
 
                 // check fast path
-                if ((existingDescriptor._flags & PropertyFlag.MutableBinding) != 0)
+                if ((existingDescriptor._flags & PropertyFlag.MutableBinding) != PropertyFlag.None)
                 {
                     existingDescriptor._value = value;
                     return true;
@@ -778,7 +731,7 @@ namespace Jint.Native.Global
                 return DefineOwnProperty(property, new PropertyDescriptor(value, PropertyFlag.None));
             }
 
-            if (!(existingDescriptor.Set is ICallable setter))
+            if (existingDescriptor.Set is not ICallable setter)
             {
                 return false;
             }
@@ -786,12 +739,6 @@ namespace Jint.Native.Global
             setter.Call(this, new[] {value});
 
             return true;
-        }
-        
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal void SetOwnProperty(Key property, PropertyDescriptor desc)
-        {
-            SetProperty(property, desc);
         }
     }
 }

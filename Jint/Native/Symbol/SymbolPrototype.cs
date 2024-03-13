@@ -1,33 +1,29 @@
-﻿using Jint.Collections;
+#pragma warning disable CA1859 // Use concrete types when possible for improved performance -- most of prototype methods return JsValue
+
+using Jint.Collections;
 using Jint.Native.Object;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
-using Jint.Runtime.Descriptors.Specialized;
 using Jint.Runtime.Interop;
 
 namespace Jint.Native.Symbol
 {
     /// <summary>
-    /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.5.4
+    /// https://tc39.es/ecma262/#sec-properties-of-the-symbol-prototype-object
     /// </summary>
-    public sealed class SymbolPrototype : ObjectInstance
+    internal sealed class SymbolPrototype : Prototype
     {
-        private SymbolConstructor _symbolConstructor;
+        private readonly SymbolConstructor _constructor;
 
-        private SymbolPrototype(Engine engine)
-            : base(engine)
+        internal SymbolPrototype(
+            Engine engine,
+            Realm realm,
+            SymbolConstructor symbolConstructor,
+            ObjectPrototype objectPrototype)
+            : base(engine, realm)
         {
-        }
-
-        public static SymbolPrototype CreatePrototypeObject(Engine engine, SymbolConstructor symbolConstructor)
-        {
-            var obj = new SymbolPrototype(engine)
-            {
-                _prototype = engine.Object.PrototypeObject,
-                _symbolConstructor = symbolConstructor
-            };
-
-            return obj;
+            _prototype = objectPrototype;
+            _constructor = symbolConstructor;
         }
 
         protected override void Initialize()
@@ -37,42 +33,52 @@ namespace Jint.Native.Symbol
             SetProperties(new PropertyDictionary(5, checkExistingKeys: false)
             {
                 ["length"] = new PropertyDescriptor(JsNumber.PositiveZero, propertyFlags),
-                ["constructor"] = new PropertyDescriptor(_symbolConstructor, PropertyFlag.Configurable | PropertyFlag.Writable),
-                ["description"] = new GetSetPropertyDescriptor(new ClrFunctionInstance(Engine, "description", Description, 0, lengthFlags), Undefined, propertyFlags),
-                ["toString"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "toString", ToSymbolString, 0, lengthFlags), PropertyFlag.Configurable | PropertyFlag.Writable),
-                ["valueOf"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "valueOf", ValueOf, 0, lengthFlags), PropertyFlag.Configurable | PropertyFlag.Writable)
+                ["constructor"] = new PropertyDescriptor(_constructor, PropertyFlag.Configurable | PropertyFlag.Writable),
+                ["description"] = new GetSetPropertyDescriptor(new ClrFunction(Engine, "description", Description, 0, lengthFlags), Undefined, propertyFlags),
+                ["toString"] = new PropertyDescriptor(new ClrFunction(Engine, "toString", ToSymbolString, 0, lengthFlags), PropertyFlag.Configurable | PropertyFlag.Writable),
+                ["valueOf"] = new PropertyDescriptor(new ClrFunction(Engine, "valueOf", ValueOf, 0, lengthFlags), PropertyFlag.Configurable | PropertyFlag.Writable)
             });
 
             SetSymbols(new SymbolDictionary(1)
                 {
-                    [GlobalSymbolRegistry.ToPrimitive] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "[Symbol.toPrimitive]", ToPrimitive, 1, lengthFlags), propertyFlags), [GlobalSymbolRegistry.ToStringTag] = new PropertyDescriptor(new JsString("Symbol"), propertyFlags)
+                    [GlobalSymbolRegistry.ToPrimitive] = new PropertyDescriptor(new ClrFunction(Engine, "[Symbol.toPrimitive]", ToPrimitive, 1, lengthFlags), propertyFlags), [GlobalSymbolRegistry.ToStringTag] = new PropertyDescriptor(new JsString("Symbol"), propertyFlags)
                 }
             );
         }
 
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-symbol.prototype.description
+        /// </summary>
         private JsValue Description(JsValue thisObject, JsValue[] arguments)
         {
             var sym = ThisSymbolValue(thisObject);
             return sym._value;
         }
 
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-symbol.prototype.tostring
+        /// </summary>
         private JsValue ToSymbolString(JsValue thisObject, JsValue[] arguments)
         {
             var sym = ThisSymbolValue(thisObject);
-            return new JsString(SymbolDescriptiveString(sym));
+            return new JsString(sym.ToString());
         }
 
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-symbol.prototype.valueof
+        /// </summary>
         private JsValue ValueOf(JsValue thisObject, JsValue[] arguments)
         {
             return ThisSymbolValue(thisObject);
         }
 
+        /// <summary>
+        /// https://tc39.es/ecma262/#sec-symbol.prototype-@@toprimitive
+        /// </summary>
         private JsValue ToPrimitive(JsValue thisObject, JsValue[] arguments)
         {
             return ThisSymbolValue(thisObject);
         }
-
-        private static string SymbolDescriptiveString(JsSymbol symbol) => symbol.ToString();
 
         private JsSymbol ThisSymbolValue(JsValue thisObject)
         {
@@ -86,7 +92,8 @@ namespace Jint.Native.Symbol
                 return instance.SymbolData;
             }
 
-            return ExceptionHelper.ThrowTypeError<JsSymbol>(_engine);
+            ExceptionHelper.ThrowTypeError(_realm);
+            return null;
         }
     }
 }

@@ -1,10 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Reflection;
 using Jint.Native;
 using Jint.Native.Object;
 using Jint.Runtime.Descriptors;
+
+#pragma warning disable IL3050
 
 namespace Jint.Runtime.Interop
 {
@@ -14,6 +15,7 @@ namespace Jint.Runtime.Interop
     /// a new <see cref="NamespaceReference"/> as it assumes that the property is a deeper
     /// level of the current namespace
     /// </summary>
+    [RequiresUnreferencedCode("Dynamic loading")]
     public class NamespaceReference : ObjectInstance, ICallable
     {
         private readonly string _path;
@@ -33,7 +35,7 @@ namespace Jint.Runtime.Interop
             return false;
         }
 
-        public JsValue Call(JsValue thisObject, JsValue[] arguments)
+        JsValue ICallable.Call(JsValue thisObject, JsValue[] arguments)
         {
             // direct calls on a NamespaceReference constructor object is creating a generic type
             var genericTypes = new Type[arguments.Length];
@@ -41,13 +43,14 @@ namespace Jint.Runtime.Interop
             {
                 var genericTypeReference = arguments[i];
                 if (genericTypeReference.IsUndefined()
-                    || !genericTypeReference.IsObject() 
-                    || genericTypeReference.AsObject().Class != ObjectClass.TypeReference)
+                    || !genericTypeReference.IsObject()
+                    || genericTypeReference.AsObject() is not TypeReference tr)
                 {
-                    ExceptionHelper.ThrowTypeError(_engine, "Invalid generic type parameter on " + _path + ", if this is not a generic type / method, are you missing a lookup assembly?");
+                    ExceptionHelper.ThrowTypeError(_engine.Realm, "Invalid generic type parameter on " + _path + ", if this is not a generic type / method, are you missing a lookup assembly?");
+                    return default;
                 }
 
-                genericTypes[i] = ((TypeReference) genericTypeReference).ReferenceType;
+                genericTypes[i] = tr.ReferenceType;
             }
 
             var typeReference = GetPath(_path + "`" + arguments.Length.ToString(CultureInfo.InvariantCulture)).As<TypeReference>();
@@ -65,7 +68,8 @@ namespace Jint.Runtime.Interop
             }
             catch (Exception e)
             {
-                return ExceptionHelper.ThrowTypeError<JsValue>(_engine, "Invalid generic type parameter on " + _path + ", if this is not a generic type / method, are you missing a lookup assembly?", e);
+                ExceptionHelper.ThrowInvalidOperationException($"Invalid generic type parameter on {_path}, if this is not a generic type / method, are you missing a lookup assembly?", e);
+                return null;
             }
         }
 
@@ -76,6 +80,7 @@ namespace Jint.Runtime.Interop
             return GetPath(newPath);
         }
 
+        [RequiresUnreferencedCode("Dynamic loading")]
         public JsValue GetPath(string path)
         {
             if (_engine.TypeCache.TryGetValue(path, out var type))
@@ -94,7 +99,7 @@ namespace Jint.Runtime.Interop
             // and only then in mscorlib. Probelm usage: System.IO.File.CreateText
 
             // search in loaded assemblies
-            var lookupAssemblies = new[] {Assembly.GetCallingAssembly(), Assembly.GetExecutingAssembly()};
+            var lookupAssemblies = new[] { Assembly.GetCallingAssembly(), Assembly.GetExecutingAssembly() };
 
             foreach (var assembly in lookupAssemblies)
             {
@@ -107,8 +112,8 @@ namespace Jint.Runtime.Interop
             }
 
             // search in lookup assemblies
-            var comparedPath = path.Replace("+", ".");
-            foreach (var assembly in _engine.Options._LookupAssemblies)
+            var comparedPath = path.Replace('+', '.');
+            foreach (var assembly in _engine.Options.Interop.AllowedAssemblies)
             {
                 type = assembly.GetType(path);
                 if (type != null)
@@ -117,14 +122,14 @@ namespace Jint.Runtime.Interop
                     return TypeReference.CreateTypeReference(_engine, type);
                 }
 
-                var lastPeriodPos = path.LastIndexOf(".", StringComparison.Ordinal);
+                var lastPeriodPos = path.LastIndexOf('.');
                 var trimPath = path.Substring(0, lastPeriodPos);
                 type = GetType(assembly, trimPath);
                 if (type != null)
                 {
                     foreach (Type nType in GetAllNestedTypes(type))
                     {
-                        if (nType.FullName.Replace("+", ".").Equals(comparedPath))
+                        if (nType.FullName != null && nType.FullName.Replace('+', '.').Equals(comparedPath, StringComparison.Ordinal))
                         {
                             _engine.TypeCache.Add(comparedPath, nType);
                             return TypeReference.CreateTypeReference(_engine, nType);
@@ -153,13 +158,13 @@ namespace Jint.Runtime.Interop
         /// <param name="typeName"> Name of the type. </param>
         ///
         /// <returns>   The type. </returns>
-        private static Type GetType(Assembly assembly, string typeName)
+        [RequiresUnreferencedCode("Assembly type loading")]
+        private static Type? GetType(Assembly assembly, string typeName)
         {
-            var compared = typeName.Replace("+", ".");
-            Type[] types = assembly.GetTypes();
-            foreach (Type t in types)
+            var compared = typeName.Replace('+', '.');
+            foreach (Type t in assembly.GetTypes())
             {
-                if (t.FullName.Replace("+", ".") == compared)
+                if (string.Equals(t.FullName?.Replace('+', '.'), compared, StringComparison.Ordinal))
                 {
                     return t;
                 }
@@ -175,10 +180,11 @@ namespace Jint.Runtime.Interop
             return types.ToArray();
         }
 
-        private static void AddNestedTypesRecursively(List<Type> types, Type type)
+        private static void AddNestedTypesRecursively(
+            List<Type> types,
+            [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicNestedTypes)] Type type)
         {
-            Type[] nestedTypes = type.GetNestedTypes(BindingFlags.Public);
-            foreach (Type nestedType in nestedTypes)
+            foreach (var nestedType in type.GetNestedTypes(BindingFlags.Public))
             {
                 types.Add(nestedType);
                 AddNestedTypesRecursively(types, nestedType);
@@ -192,7 +198,7 @@ namespace Jint.Runtime.Interop
 
         public override string ToString()
         {
-            return "[Namespace: " + _path + "]";
+            return "[CLR namespace: " + _path + "]";
         }
     }
 }

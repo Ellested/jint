@@ -1,4 +1,4 @@
-﻿using Jint.Collections;
+using Jint.Collections;
 using Jint.Native.Object;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
@@ -9,41 +9,34 @@ namespace Jint.Native.Error
     /// <summary>
     /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.11.4
     /// </summary>
-    public sealed class ErrorPrototype : ErrorInstance
+    internal sealed class ErrorPrototype : ErrorInstance
     {
-        private ErrorConstructor _errorConstructor;
+        private readonly JsString _name;
+        private readonly Realm _realm;
+        private readonly ErrorConstructor _constructor;
 
-        private ErrorPrototype(Engine engine, JsString name)
-            : base(engine, name)
+        internal ErrorPrototype(
+            Engine engine,
+            Realm realm,
+            ErrorConstructor constructor,
+            ObjectInstance prototype,
+            JsString name)
+            : base(engine, ObjectClass.Object)
         {
-        }
-
-        public static ErrorPrototype CreatePrototypeObject(Engine engine, ErrorConstructor errorConstructor, JsString name)
-        {
-            var obj = new ErrorPrototype(engine, name)
-            {
-                _errorConstructor = errorConstructor,
-            };
-
-            if (name._value != "Error")
-            {
-                obj._prototype = engine.Error.PrototypeObject;
-            }
-            else
-            {
-                obj._prototype = engine.Object.PrototypeObject;
-            }
-
-            return obj;
+            _realm = realm;
+            _name = name;
+            _constructor = constructor;
+            _prototype = prototype;
         }
 
         protected override void Initialize()
         {
             var properties = new PropertyDictionary(3, checkExistingKeys: false)
             {
-                ["constructor"] = new PropertyDescriptor(_errorConstructor, PropertyFlag.NonEnumerable),
+                ["constructor"] = new PropertyDescriptor(_constructor, PropertyFlag.NonEnumerable),
                 ["message"] = new PropertyDescriptor("", PropertyFlag.Configurable | PropertyFlag.Writable),
-                ["toString"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "toString", ToString), PropertyFlag.Configurable | PropertyFlag.Writable)
+                ["name"] = new PropertyDescriptor(_name, PropertyFlag.Configurable | PropertyFlag.Writable),
+                ["toString"] = new PropertyDescriptor(new ClrFunction(Engine, "toString", ToString, 0, PropertyFlag.Configurable), PropertyFlag.Configurable | PropertyFlag.Writable)
             };
             SetProperties(properties);
         }
@@ -53,21 +46,15 @@ namespace Jint.Native.Error
             var o = thisObject.TryCast<ObjectInstance>();
             if (ReferenceEquals(o, null))
             {
-                ExceptionHelper.ThrowTypeError(Engine);
+                ExceptionHelper.ThrowTypeError(_realm);
             }
 
-            var name = TypeConverter.ToString(o.Get("name", this));
+            var nameProp = o.Get("name", this);
+            var name = nameProp.IsUndefined() ? "Error" : TypeConverter.ToString(nameProp);
 
             var msgProp = o.Get("message", this);
-            string msg;
-            if (msgProp.IsUndefined())
-            {
-                msg = "";
-            }
-            else
-            {
-                msg = TypeConverter.ToString(msgProp);
-            }
+            string msg = msgProp.IsUndefined() ? "" : TypeConverter.ToString(msgProp);
+
             if (name == "")
             {
                 return msg;

@@ -1,21 +1,54 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
-    <TargetFrameworks>net461;netcoreapp3.1</TargetFrameworks>
+    <TargetFramework>net8.0</TargetFramework>
+    <!--<TargetFrameworks Condition="'$(OS)' == 'Windows_NT'">$(TargetFrameworks);net461</TargetFrameworks>-->
+    <AssemblyOriginatorKeyFile>..\Jint\Jint.snk</AssemblyOriginatorKeyFile>
+    <SignAssembly>true</SignAssembly>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);CS8002</NoWarn>
+    <GeneratedTestSuiteDir>Generated</GeneratedTestSuiteDir>
+    <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Jint\Jint.csproj" />
   </ItemGroup>
+
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="16.5.0" />
-    <PackageReference Include="Newtonsoft.Json" Version="12.0.3" />
-    <PackageReference Include="xunit" Version="2.4.1" />
-    <PackageReference Include="xunit.analyzers" Version="0.10.0" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.4.1" />
-    <PackageReference Include="xunit.runner.console" Version="2.4.1" />
-    <DotNetCliToolReference Include="dotnet-xunit" Version="2.3.1" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="NUnit" />
+    <PackageReference Include="NUnit3TestAdapter" />
+    <PackageReference Include="Test262Harness" />
   </ItemGroup>
+
   <ItemGroup>
-    <None Remove="harness\**" />
-    <None Remove="test\**" />
+    <Using Include="NUnit.Framework" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Content Include=".config\dotnet-tools.json" />
+  </ItemGroup>
+
+  <!-- Based on the idea presented at https://mhut.ch/journal/2015/06/30/build-time-code-generation-in-msbuild -->
+  <Target Name="GenerateTestSuite" DependsOnTargets="_GenerateTestSuite" BeforeTargets="BeforeBuild" Condition="!Exists($([System.IO.Path]::Combine($(MSBuildThisFileDirectory), $(GeneratedTestSuiteDir))))">
+    <ItemGroup>
+      <Compile Include="$(GeneratedTestSuiteDir)\**\*.cs" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="_GenerateTestSuite">
+    <Exec Command="dotnet tool restore" />
+    <Exec Command="dotnet test262 generate" />
+  </Target>
+
+  <Target Name="DeleteTestSuite" DependsOnTargets="_DeleteTestSuite" AfterTargets="AfterClean" Condition="Exists($([System.IO.Path]::Combine($(MSBuildThisFileDirectory), $(GeneratedTestSuiteDir))))">
+    <RemoveDir Directories="$(GeneratedTestSuiteDir)" />
+  </Target>
+
+  <Target Name="_DeleteTestSuite">
+    <ItemGroup>
+      <Compile Remove="$(GeneratedTestSuiteDir)\**\*.cs" />
+    </ItemGroup>
+  </Target>
 </Project>

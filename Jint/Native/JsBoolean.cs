@@ -1,66 +1,70 @@
-﻿using System;
 using Jint.Runtime;
 
-namespace Jint.Native
+namespace Jint.Native;
+
+public sealed class JsBoolean : JsValue, IEquatable<JsBoolean>
 {
-    public sealed class JsBoolean : JsValue, IEquatable<JsBoolean>
+    public static readonly JsBoolean False = new JsBoolean(false);
+    public static readonly JsBoolean True = new JsBoolean(true);
+
+    internal static readonly object BoxedTrue = true;
+    internal static readonly object BoxedFalse = false;
+
+    internal readonly bool _value;
+
+    private JsBoolean(bool value) : base(Types.Boolean)
     {
-        public static readonly JsBoolean False = new JsBoolean(false);
-        public static readonly JsBoolean True = new JsBoolean(true);
+        _value = value;
+    }
 
-        internal static readonly object BoxedTrue = true;
-        internal static readonly object BoxedFalse = false;
+    internal static JsBoolean Create(bool value) => value ? True : False;
 
-        internal readonly bool _value;
+    public override object ToObject() => _value ? BoxedTrue : BoxedFalse;
 
-        public JsBoolean(bool value) : base(Types.Boolean)
+    internal override bool ToBoolean() => _value;
+
+    public override string ToString()
+    {
+        return _value ? "true" : "false";
+    }
+
+    protected internal override bool IsLooselyEqual(JsValue value)
+    {
+        if (value is JsBoolean jsBoolean)
         {
-            _value = value;
+            return Equals(jsBoolean);
         }
 
-        public override object ToObject()
+        return !value.IsNullOrUndefined() && base.IsLooselyEqual(value);
+    }
+
+    public override bool Equals(object? obj)
+    {
+        return Equals(obj as JsBoolean);
+    }
+
+    public override bool Equals(JsValue? other)
+    {
+        return Equals(other as JsBoolean);
+    }
+
+    public bool Equals(JsBoolean? other)
+    {
+        if (ReferenceEquals(this, other))
         {
-            return _value ? BoxedTrue : BoxedFalse;
+            return true;
         }
 
-        public override string ToString()
+        if (other is null)
         {
-            return _value ? "true" : "false";
+            return false;
         }
 
-        public override bool Equals(JsValue obj)
-        {
-            if (ReferenceEquals(null, obj))
-            {
-                return false;
-            }
+        return _value == other._value;
+    }
 
-            if (!(obj is JsBoolean number))
-            {
-                return false;
-            }
-
-            return Equals(number);
-        }
-
-        public bool Equals(JsBoolean other)
-        {
-            if (ReferenceEquals(null, other))
-            {
-                return false;
-            }
-
-            if (ReferenceEquals(this, other))
-            {
-                return true;
-            }
-
-            return _value == other._value;
-        }
-
-        public override int GetHashCode()
-        {
-            return _value.GetHashCode();
-        }
+    public override int GetHashCode()
+    {
+        return _value.GetHashCode();
     }
 }

@@ -1,112 +1,235 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Globalization;
+using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using Jint.Collections;
 using Jint.Native;
-using Jint.Native.Function;
 using Jint.Native.Object;
+using Jint.Native.Symbol;
 using Jint.Runtime.Descriptors;
-using Jint.Runtime.Descriptors.Specialized;
+using Jint.Runtime.Interop.Reflection;
+
+#pragma warning disable IL2072
 
 namespace Jint.Runtime.Interop
 {
-    public sealed class TypeReference : FunctionInstance, IConstructor, IObjectWrapper
+    public sealed class TypeReference : Constructor, IObjectWrapper
     {
-        private static readonly JsString _name = new JsString("typereference");
+        private static readonly JsString _name = new("typereference");
+        private static readonly ConcurrentDictionary<Type, MethodDescriptor[]> _constructorCache = new();
+        private static readonly ConcurrentDictionary<MemberAccessorKey, ReflectionAccessor> _memberAccessors = new();
 
-        private TypeReference(Engine engine)
-            : base(engine, _name, FunctionThisMode.Global, ObjectClass.TypeReference)
+        private readonly record struct MemberAccessorKey(Type Type, string PropertyName);
+
+        private TypeReference(
+            Engine engine,
+            [DynamicallyAccessedMembers(InteropHelper.DefaultDynamicallyAccessedMemberTypes)] Type type)
+            : base(engine, engine.Realm, _name)
         {
+            ReferenceType = type;
+
+            _prototype = engine.Realm.Intrinsics.Function.PrototypeObject;
+            _length = PropertyDescriptor.AllForbiddenDescriptor.NumberZero;
+
+            var proto = new TypeReferencePrototype(engine, this);
+            _prototypeDescriptor = new PropertyDescriptor(proto, PropertyFlag.AllForbidden);
+
+            PreventExtensions();
         }
 
-        public Type ReferenceType { get; set; }
+        public Type ReferenceType { get; }
 
-        public static TypeReference CreateTypeReference(Engine engine, Type type)
+        public static TypeReference CreateTypeReference<
+            [DynamicallyAccessedMembers(InteropHelper.DefaultDynamicallyAccessedMemberTypes)] T>(Engine engine)
         {
-            var obj = new TypeReference(engine);
-            obj.PreventExtensions();
-            obj.ReferenceType = type;
-
-            // The value of the [[Prototype]] internal property of the TypeReference constructor is the Function prototype object
-            obj._prototype = engine.Function.PrototypeObject;
-            obj._length = PropertyDescriptor.AllForbiddenDescriptor.NumberZero;
-
-            // The initial value of Boolean.prototype is the Boolean prototype object
-            obj._prototypeDescriptor = new PropertyDescriptor(engine.Object.PrototypeObject, PropertyFlag.AllForbidden);
-
-            return obj;
+            return CreateTypeReference(engine, typeof(T));
         }
 
-        public override JsValue Call(JsValue thisObject, JsValue[] arguments)
+        public static TypeReference CreateTypeReference(
+            Engine engine,
+            [DynamicallyAccessedMembers(InteropHelper.DefaultDynamicallyAccessedMemberTypes)] Type type)
+        {
+            var reference = new TypeReference(engine, type);
+            engine.RegisterTypeReference(reference);
+            return reference;
+        }
+
+        protected internal override JsValue Call(JsValue thisObject, JsValue[] arguments)
         {
             // direct calls on a TypeReference constructor object is equivalent to the new operator
-            return Construct(arguments, thisObject);
+            return Construct(arguments, Undefined);
         }
 
-        public ObjectInstance Construct(JsValue[] arguments, JsValue newTarget)
+        public override ObjectInstance Construct(JsValue[] arguments, JsValue newTarget)
         {
-            if (arguments.Length == 0 && ReferenceType.IsValueType)
+            static ObjectInstance ObjectCreator(Engine engine, Realm realm, ObjectCreateState state)
             {
-                var instance = Activator.CreateInstance(ReferenceType);
-                var result = TypeConverter.ToObject(Engine, FromObject(Engine, instance));
+                var arguments = state.Arguments;
+                var referenceType = state.TypeReference.ReferenceType;
+
+                var fromOptionsCreator = engine.Options.Interop.CreateTypeReferenceObject(engine, referenceType, arguments);
+                ObjectInstance? result = null;
+                if (fromOptionsCreator is not null)
+                {
+                    result = TypeConverter.ToObject(realm, FromObject(engine, fromOptionsCreator));
+                }
+                else if (arguments.Length == 0 && referenceType.IsValueType)
+                {
+                    var instance = Activator.CreateInstance(referenceType);
+                    result = TypeConverter.ToObject(realm, FromObject(engine, instance));
+                }
+                else
+                {
+                    var constructors = _constructorCache.GetOrAdd(
+                        referenceType,
+                        t => MethodDescriptor.Build(t.GetConstructors(BindingFlags.Public | BindingFlags.Instance)));
+
+                    var argumentProvider = new Func<MethodDescriptor, JsValue[]>(method =>
+                    {
+                        var parameters = method.Parameters;
+
+                        if (parameters.Length == 0)
+                        {
+                            return arguments;
+                        }
+
+                        var newArguments = new JsValue[parameters.Length];
+                        var currentParameter = parameters[parameters.Length - 1];
+                        var isParamArray = currentParameter.ParameterType.IsArray &&
+                                           currentParameter.GetCustomAttribute(typeof(ParamArrayAttribute)) is not null;
+
+                        // last parameter is a ParamArray
+                        if (isParamArray && arguments.Length >= parameters.Length - 1)
+                        {
+                            var currentArgument = JsValue.Undefined;
+
+                            if (arguments.Length > parameters.Length - 1)
+                            {
+                                currentArgument = arguments[parameters.Length - 1];
+                            }
+
+                            // nothing to do, is an array as expected
+                            if (currentArgument.IsArray())
+                            {
+                                return arguments;
+                            }
+
+                            Array.Copy(arguments, 0, newArguments, 0, parameters.Length - 1);
+
+                            // the last argument is null or undefined and there are exactly the same arguments and parameters
+                            if (currentArgument.IsNullOrUndefined() && parameters.Length == arguments.Length)
+                            {
+                                // this fix the issue with CLR that receives a null ParamArray instead of an empty one
+                                newArguments[parameters.Length - 1] = new JsArray(engine, 0);
+                                return newArguments;
+                            }
+
+                            // pack the rest of the arguments into an array, as CLR expects
+                            var paramArray = new JsValue[Math.Max(0, arguments.Length - (parameters.Length - 1))];
+                            if (paramArray.Length > 0)
+                            {
+                                Array.Copy(arguments, parameters.Length - 1, paramArray, 0, paramArray.Length);
+                            }
+                            newArguments[parameters.Length - 1] = new JsArray(engine, paramArray);
+
+                            return newArguments;
+                        }
+
+                        // TODO: edge case, last parameter is ParamArray with optional parameter before?
+                        if (isParamArray && arguments.Length < parameters.Length - 1)
+                        {
+                            return arguments;
+                        }
+
+                        // optional parameters
+                        if (parameters.Length > arguments.Length)
+                        {
+                            // all missing ones must be optional
+                            int start = parameters.Length - arguments.Length;
+                            for (var i = start; i < parameters.Length; i++)
+                            {
+                                if (!parameters[i].IsOptional)
+                                {
+                                    // use original arguments
+                                    return arguments;
+                                }
+                            }
+
+                            Array.Copy(arguments, 0, newArguments, 0, arguments.Length);
+
+                            for (var i = parameters.Length - 1; i >= 0; i--)
+                            {
+                                currentParameter = parameters[i];
+
+                                if (i >= arguments.Length - 1)
+                                {
+                                    if (!currentParameter.IsOptional)
+                                    {
+                                        break;
+                                    }
+
+                                    if (arguments.Length - 1 < i || arguments[i].IsUndefined())
+                                    {
+                                        newArguments[i] = FromObject(engine, currentParameter.DefaultValue);
+                                    }
+                                }
+                            }
+
+                            return newArguments;
+                        }
+
+                        return arguments;
+                    });
+
+                    foreach (var (method, methodArguments, _) in InteropHelper.FindBestMatch(engine, constructors, argumentProvider))
+                    {
+                        var retVal = method.Call(engine, null, methodArguments);
+                        result = TypeConverter.ToObject(realm, retVal);
+
+                        // todo: cache method info
+                        break;
+                    }
+                }
+
+                if (result is null)
+                {
+                    ExceptionHelper.ThrowTypeError(realm, $"Could not resolve a constructor for type {referenceType} for given arguments");
+                }
+
+                result.SetPrototypeOf(state.TypeReference);
 
                 return result;
             }
 
-            var constructors = ReferenceType.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+            // TODO should inject prototype that reflects TypeReference's target's layout
+            var thisArgument = OrdinaryCreateFromConstructor(
+                newTarget,
+                static intrinsics => intrinsics.Object.PrototypeObject,
+                ObjectCreator,
+                new ObjectCreateState(this, arguments));
 
-            foreach (var tuple in TypeConverter.FindBestMatch(_engine, constructors, (info, b) => arguments))
-            {
-                var method = tuple.Item1;
-
-                var parameters = new object[arguments.Length];
-                var methodParameters = method.GetParameters();
-                try
-                {
-                    for (var i = 0; i < arguments.Length; i++)
-                    {
-                        var parameterType = methodParameters[i].ParameterType;
-
-                        if (typeof(JsValue).IsAssignableFrom(parameterType))
-                        {
-                            parameters[i] = arguments[i];
-                        }
-                        else
-                        {
-                            parameters[i] = Engine.ClrTypeConverter.Convert(
-                                arguments[i].ToObject(),
-                                parameterType,
-                                CultureInfo.InvariantCulture);
-                        }
-                    }
-
-                    var constructor = (ConstructorInfo) method;
-                    var instance = constructor.Invoke(parameters);
-                    var result = TypeConverter.ToObject(Engine, FromObject(Engine, instance));
-
-                    // todo: cache method info
-
-                    return result;
-                }
-                catch
-                {
-                    // ignore method
-                }
-            }
-
-            return ExceptionHelper.ThrowTypeError<ObjectInstance>(_engine, "No public methods with the specified arguments were found.");
+            return thisArgument;
         }
 
-        public override bool HasInstance(JsValue v)
+        private readonly record struct ObjectCreateState(TypeReference TypeReference, JsValue[] Arguments);
+
+        public override bool Equals(JsValue? other)
         {
-            if (v.IsObject())
+            if (other is TypeReference typeReference)
             {
-                var wrapper = v.AsObject() as IObjectWrapper;
-                if (wrapper != null)
-                    return wrapper.Target.GetType() == ReferenceType;
+                return this.ReferenceType == typeReference.ReferenceType;
             }
 
-            return base.HasInstance(v);
+            return base.Equals(other);
+        }
+
+        internal override bool OrdinaryHasInstance(JsValue v)
+        {
+            if (v is IObjectWrapper wrapper)
+            {
+                return wrapper.Target.GetType() == ReferenceType;
+            }
+
+            return base.OrdinaryHasInstance(v);
         }
 
         public override bool DefineOwnProperty(JsValue property, PropertyDescriptor desc)
@@ -127,65 +250,125 @@ namespace Jint.Runtime.Interop
             }
 
             var ownDesc = GetOwnProperty(property);
-
-            if (ownDesc == null)
-            {
-                return false;
-            }
-
             ownDesc.Value = value;
             return true;
         }
 
         public override PropertyDescriptor GetOwnProperty(JsValue property)
         {
-            // todo: cache members locally
-            var name = property.ToString();
-            if (ReferenceType.IsEnum)
+            if (property is not JsString jsString)
             {
-                Array enumValues = Enum.GetValues(ReferenceType);
-                Array enumNames = Enum.GetNames(ReferenceType);
-
-                for (int i = 0; i < enumValues.Length; i++)
+                if (property == GlobalSymbolRegistry.HasInstance)
                 {
-                    if (enumNames.GetValue(i) as string == name)
+                    var hasInstanceFunction = new ClrFunction(
+                        Engine,
+                        "[Symbol.hasInstance]",
+                        HasInstance,
+                        1,
+                        PropertyFlag.Configurable);
+
+                    var hasInstanceProperty = new PropertyDescriptor(hasInstanceFunction, PropertyFlag.AllForbidden);
+                    SetProperty(GlobalSymbolRegistry.HasInstance, hasInstanceProperty);
+                    return hasInstanceProperty;
+                }
+            }
+            else
+            {
+                var key = jsString._value;
+
+                if (_properties?.TryGetValue(key, out var descriptor) != true)
+                {
+                    descriptor = CreatePropertyDescriptor(key);
+                    if (!ReferenceEquals(descriptor, PropertyDescriptor.Undefined))
                     {
-                        return new PropertyDescriptor((int) enumValues.GetValue(i), PropertyFlag.AllForbidden);
+                        _properties ??= new PropertyDictionary();
+                        _properties[key] = descriptor;
+                        return descriptor;
                     }
                 }
-                return PropertyDescriptor.Undefined;
             }
 
-            var propertyInfo = ReferenceType.GetProperty(name, BindingFlags.Public | BindingFlags.Static);
-            if (propertyInfo != null)
-            {
-                return new PropertyInfoDescriptor(Engine, propertyInfo, Type);
-            }
+            return base.GetOwnProperty(property);
+        }
 
-            var fieldInfo = ReferenceType.GetField(name, BindingFlags.Public | BindingFlags.Static);
-            if (fieldInfo != null)
-            {
-                return new FieldInfoDescriptor(Engine, fieldInfo, Type);
-            }
+        private PropertyDescriptor CreatePropertyDescriptor(string name)
+        {
+            var key = new MemberAccessorKey(ReferenceType, name);
+            var accessor = _memberAccessors.GetOrAdd(key, x => ResolveMemberAccessor(_engine, x.Type, x.PropertyName));
+            return accessor.CreatePropertyDescriptor(_engine, ReferenceType, name, enumerable: true);
+        }
 
-            List<MethodInfo> methodInfo = null;
-            foreach (var mi in ReferenceType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+        private static ReflectionAccessor ResolveMemberAccessor(
+            Engine engine,
+            [DynamicallyAccessedMembers(InteropHelper.DefaultDynamicallyAccessedMemberTypes | DynamicallyAccessedMemberTypes.PublicNestedTypes | DynamicallyAccessedMemberTypes.Interfaces)]
+            Type type,
+            string name)
+        {
+            var typeResolver = engine.Options.Interop.TypeResolver;
+
+            if (type.IsEnum)
             {
-                if (mi.Name == name)
+                var memberNameComparer = typeResolver.MemberNameComparer;
+                var typeResolverMemberNameCreator = typeResolver.MemberNameCreator;
+#if NET7_0_OR_GREATER
+                var enumValues = type.GetEnumValuesAsUnderlyingType();
+#else
+                var enumValues = Enum.GetValues(type);
+#endif
+                var enumNames = Enum.GetNames(type);
+
+                for (var i = 0; i < enumValues.Length; i++)
                 {
-                    methodInfo = methodInfo ?? new List<MethodInfo>();
-                    methodInfo.Add(mi);
+                    var enumOriginalName = enumNames.GetValue(i)?.ToString() ?? "";
+                    var member = type.GetMember(enumOriginalName)[0];
+                    foreach (var exposedName in typeResolverMemberNameCreator(member))
+                    {
+                        if (memberNameComparer.Equals(name, exposedName))
+                        {
+                            var value = enumValues.GetValue(i)!;
+                            return new ConstantValueAccessor(JsNumber.Create(value));
+                        }
+                    }
                 }
+
+                return ConstantValueAccessor.NullAccessor;
             }
 
-            if (methodInfo == null || methodInfo.Count == 0)
-            {
-                return PropertyDescriptor.Undefined;
-            }
-
-            return new PropertyDescriptor(new MethodInfoFunctionInstance(Engine, methodInfo.ToArray()), PropertyFlag.AllForbidden);
+            const BindingFlags BindingFlags = BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy;
+            return typeResolver.TryFindMemberAccessor(engine, type, name, BindingFlags, indexerToTry: null, out var accessor)
+                ? accessor
+                : ConstantValueAccessor.NullAccessor;
         }
 
         public object Target => ReferenceType;
+
+        private static JsBoolean HasInstance(JsValue thisObject, JsValue[] arguments)
+        {
+            var typeReference = thisObject as TypeReference;
+            var other = arguments.At(0);
+
+            if (typeReference is null)
+            {
+                return JsBoolean.False;
+            }
+
+            var baseType = typeReference.ReferenceType;
+
+            var derivedType = other switch
+            {
+                ObjectWrapper wrapper => wrapper.Target.GetType(),
+                TypeReferencePrototype otherTypeReference => otherTypeReference.TypeReference.ReferenceType,
+                _ => null
+            };
+
+            return derivedType != null && baseType != null && (derivedType == baseType || derivedType.IsSubclassOf(baseType))
+                ? JsBoolean.True
+                : JsBoolean.False;
+        }
+
+        public override string ToString()
+        {
+            return "[CLR type: " + ReferenceType + "]";
+        }
     }
 }

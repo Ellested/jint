@@ -161,3 +161,7 @@ project.lock.json
 
 .idea
 BenchmarkDotNet.Artifacts*
+.vscode
+
+# generated code
+Jint.Tests.Test262/Generated

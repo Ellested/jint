@@ -1,21 +1,31 @@
 using Esprima.Ast;
 using Jint.Runtime.Interpreter.Expressions;
 
-namespace Jint.Runtime.Interpreter.Statements
+namespace Jint.Runtime.Interpreter.Statements;
+
+internal sealed class JintExpressionStatement : JintStatement<ExpressionStatement>
 {
-    internal sealed class JintExpressionStatement : JintStatement<ExpressionStatement>
+    private JintExpression _expression = null!;
+
+    // identifiers are queried the most
+    private JintIdentifierExpression? _identifierExpression;
+
+    public JintExpressionStatement(ExpressionStatement statement) : base(statement)
     {
-        private readonly JintExpression _expression;
+    }
 
-        public JintExpressionStatement(Engine engine, ExpressionStatement statement) : base(engine, statement)
-        {
-            _expression = JintExpression.Build(engine, statement.Expression);
-        }
+    protected override void Initialize(EvaluationContext context)
+    {
+        _expression = JintExpression.Build(_statement.Expression);
+        _identifierExpression = _expression as JintIdentifierExpression;
+    }
 
-        protected override Completion ExecuteInternal()
-        {
-            var value = _expression.GetValue();
-            return new Completion(CompletionType.Normal, value, null, Location);
-        }
+    protected override Completion ExecuteInternal(EvaluationContext context)
+    {
+        var value = _identifierExpression is not null
+            ? _identifierExpression.GetValue(context)
+            : _expression.GetValue(context);
+
+        return new Completion(context.Completion, value, _statement);
     }
 }

@@ -1,31 +1,37 @@
 using Esprima.Ast;
 using Jint.Native;
-using Jint.Native.Array;
 using Jint.Native.Iterator;
 
 namespace Jint.Runtime.Interpreter.Expressions
 {
     internal sealed class JintArrayExpression : JintExpression
     {
-        private JintExpression[] _expressions;
+        private JintExpression?[] _expressions = Array.Empty<JintExpression?>();
         private bool _hasSpreads;
+        private bool _initialized;
 
-        public JintArrayExpression(Engine engine, ArrayExpression expression) : base(engine, expression)
+        private JintArrayExpression(ArrayExpression expression) : base(expression)
         {
-            _initialized = false;
         }
 
-        protected override void Initialize()
+        public static JintExpression Build(ArrayExpression expression)
         {
-            var node = (ArrayExpression) _expression;
-            _expressions = new JintExpression[node.Elements.Count];
-            for (var n = 0; n < _expressions.Length; n++)
+            return expression.Elements.Count == 0
+                ? JintEmptyArrayExpression.Instance
+                : new JintArrayExpression(expression);
+        }
+
+        private void Initialize()
+        {
+            ref readonly var elements = ref ((ArrayExpression) _expression).Elements;
+            var expressions = _expressions = new JintExpression[((ArrayExpression) _expression).Elements.Count];
+            for (var n = 0; n < expressions.Length; n++)
             {
-                var expr = node.Elements[n];
+                var expr = elements[n];
                 if (expr != null)
                 {
-                    var expression = Build(_engine, expr);
-                    _expressions[n] = expression;
+                    var expression = Build(expr);
+                    expressions[n] = expression;
                     _hasSpreads |= expr.Type == Nodes.SpreadElement;
                 }
             }
@@ -34,26 +40,29 @@ namespace Jint.Runtime.Interpreter.Expressions
             _initialized = true;
         }
 
-        protected override object EvaluateInternal()
+        protected override object EvaluateInternal(EvaluationContext context)
         {
-            var a = _engine.Array.ConstructFast(_hasSpreads ? 0 : (uint) _expressions.Length);
-            var expressions = _expressions;
+            if (!_initialized)
+            {
+                Initialize();
+                _initialized = true;
+            }
+
+            var engine = context.Engine;
+            var a = engine.Realm.Intrinsics.Array.ArrayCreate(_hasSpreads ? 0 : (uint) _expressions.Length);
 
             uint arrayIndexCounter = 0;
-            for (uint i = 0; i < (uint) expressions.Length; i++)
+            foreach (var expr in _expressions)
             {
-                var expr = expressions[i];
                 if (expr == null)
                 {
-                    arrayIndexCounter++;
-                    continue;
+                    a.SetIndexValue(arrayIndexCounter++, null, updateLength: false);
                 }
-
-                if (_hasSpreads && expr is JintSpreadExpression jse)
+                else if (_hasSpreads && expr is JintSpreadExpression jse)
                 {
-                    jse.GetValueAndCheckIterator(out var objectInstance, out var iterator);
+                    jse.GetValueAndCheckIterator(context, out var objectInstance, out var iterator);
                     // optimize for array
-                    if (objectInstance is ArrayInstance ai)
+                    if (objectInstance is JsArray ai)
                     {
                         var length = ai.GetLength();
                         var newLength = arrayIndexCounter + length;
@@ -64,14 +73,14 @@ namespace Jint.Runtime.Interpreter.Expressions
                     }
                     else
                     {
-                        var protocol = new ArraySpreadProtocol(_engine, a, iterator, arrayIndexCounter);
+                        var protocol = new ArraySpreadProtocol(engine, a, iterator!, arrayIndexCounter);
                         protocol.Execute();
                         arrayIndexCounter += protocol._addedCount;
                     }
                 }
                 else
                 {
-                    var value = expr.GetValue();
+                    var value = expr.GetValue(context);
                     a.SetIndexValue(arrayIndexCounter++, value, updateLength: false);
                 }
             }
@@ -86,27 +95,44 @@ namespace Jint.Runtime.Interpreter.Expressions
 
         private sealed class ArraySpreadProtocol : IteratorProtocol
         {
-            private readonly ArrayInstance _instance;
-            internal long _index;
-            internal uint _addedCount = 0;
+            private readonly JsArray _instance;
+            private long _index;
+            internal uint _addedCount;
 
             public ArraySpreadProtocol(
                 Engine engine,
-                ArrayInstance instance,
-                IIterator iterator,
+                JsArray instance,
+                IteratorInstance iterator,
                 long startIndex) : base(engine, iterator, 0)
             {
                 _instance = instance;
                 _index = startIndex - 1;
             }
 
-            protected override void ProcessItem(JsValue[] args, JsValue currentValue)
+            protected override void ProcessItem(JsValue[] arguments, JsValue currentValue)
             {
                 _index++;
                 _addedCount++;
-                var jsValue = ExtractValueFromIteratorInstance(currentValue);
+                _instance.SetIndexValue((uint) _index, currentValue, updateLength: false);
+            }
+        }
 
-                _instance.SetIndexValue((uint) _index, jsValue, updateLength: false);
+        internal sealed class JintEmptyArrayExpression : JintExpression
+        {
+            public static JintEmptyArrayExpression Instance = new(new ArrayExpression(NodeList.Create(System.Linq.Enumerable.Empty<Expression?>())));
+
+            private JintEmptyArrayExpression(Expression expression) : base(expression)
+            {
+            }
+
+            protected override object EvaluateInternal(EvaluationContext context)
+            {
+                return new JsArray(context.Engine, Array.Empty<JsValue>());
+            }
+
+            public override JsValue GetValue(EvaluationContext context)
+            {
+                return new JsArray(context.Engine, Array.Empty<JsValue>());
             }
         }
     }

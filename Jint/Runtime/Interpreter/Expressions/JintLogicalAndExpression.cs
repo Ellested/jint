@@ -5,18 +5,30 @@ namespace Jint.Runtime.Interpreter.Expressions
 {
     internal sealed class JintLogicalAndExpression : JintExpression
     {
-        private readonly JintExpression _left;
-        private readonly JintExpression _right;
+        private JintExpression _left = null!;
+        private JintExpression _right = null!;
+        private bool _initialized;
 
-        public JintLogicalAndExpression(Engine engine, BinaryExpression expression) : base(engine, expression)
+        public JintLogicalAndExpression(BinaryExpression expression) : base(expression)
         {
-            _left = Build(engine, expression.Left);
-            _right = Build(engine, expression.Right);
         }
 
-        protected override object EvaluateInternal()
+        private void Initialize()
         {
-            var left = _left.GetValue();
+            var expression = (BinaryExpression) _expression;
+            _left = Build(expression.Left);
+            _right = Build(expression.Right);
+        }
+
+        protected override object EvaluateInternal(EvaluationContext context)
+        {
+            if (!_initialized)
+            {
+                Initialize();
+                _initialized = true;
+            }
+
+            var left = _left.GetValue(context);
 
             if (left is JsBoolean b && !b._value)
             {
@@ -28,7 +40,7 @@ namespace Jint.Runtime.Interpreter.Expressions
                 return left;
             }
 
-            return _right.GetValue();
+            return _right.GetValue(context);
         }
     }
 }

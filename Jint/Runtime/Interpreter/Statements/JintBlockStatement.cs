@@ -1,45 +1,99 @@
-using System.Collections.Generic;
 using Esprima.Ast;
 using Jint.Runtime.Environments;
+using Environment = Jint.Runtime.Environments.Environment;
 
 namespace Jint.Runtime.Interpreter.Statements
 {
     internal sealed class JintBlockStatement : JintStatement<BlockStatement>
     {
-        private JintStatementList _statementList;
-        private List<VariableDeclaration> _lexicalDeclarations;
+        private JintStatementList? _statementList;
+        private JintStatement? _singleStatement;
+        private List<Declaration>? _lexicalDeclarations;
 
-        public JintBlockStatement(Engine engine, BlockStatement blockStatement) : base(engine, blockStatement)
+        public JintBlockStatement(BlockStatement blockStatement) : base(blockStatement)
         {
-            _initialized = false;
         }
 
-        protected override void Initialize()
+        protected override void Initialize(EvaluationContext context)
         {
-            _statementList = new JintStatementList(_engine, _statement, _statement.Body);
             _lexicalDeclarations = HoistingScope.GetLexicalDeclarations(_statement);
+            if (_statement.Body.Count == 1)
+            {
+                _singleStatement = Build(_statement.Body[0]);
+            }
+            else
+            {
+                _statementList = new JintStatementList(_statement, _statement.Body);
+            }
         }
 
-        // http://www.ecma-international.org/ecma-262/6.0/#sec-blockdeclarationinstantiation
-        protected override Completion ExecuteInternal()
+        /// <summary>
+        /// Optimized for direct access without virtual dispatch.
+        /// </summary>
+        public Completion ExecuteBlock(EvaluationContext context)
         {
-            LexicalEnvironment oldEnv = null;
+            if (_statementList is null && _singleStatement is null)
+            {
+                Initialize(context);
+            }
+
+            Environment? oldEnv = null;
+            var engine = context.Engine;
             if (_lexicalDeclarations != null)
             {
-                oldEnv = _engine.ExecutionContext.LexicalEnvironment;
-                var blockEnv = LexicalEnvironment.NewDeclarativeEnvironment(_engine, _engine.ExecutionContext.LexicalEnvironment);
+                oldEnv = engine.ExecutionContext.LexicalEnvironment;
+                var blockEnv = JintEnvironment.NewDeclarativeEnvironment(engine, engine.ExecutionContext.LexicalEnvironment);
                 JintStatementList.BlockDeclarationInstantiation(blockEnv, _lexicalDeclarations);
-                _engine.UpdateLexicalEnvironment(blockEnv);
+                engine.UpdateLexicalEnvironment(blockEnv);
             }
 
-            var blockValue = _statementList.Execute();
-
-            if (oldEnv != null)
+            Completion blockValue;
+            if (_singleStatement is not null)
             {
-                _engine.UpdateLexicalEnvironment(oldEnv);
+                blockValue = ExecuteSingle(context);
             }
-            
+            else
+            {
+                blockValue = _statementList!.Execute(context);
+            }
+
+            if (oldEnv is not null)
+            {
+                engine.UpdateLexicalEnvironment(oldEnv);
+            }
+
             return blockValue;
+        }
+
+        private Completion ExecuteSingle(EvaluationContext context)
+        {
+            Completion blockValue;
+            try
+            {
+                blockValue = _singleStatement!.Execute(context);
+                if (context.Engine._error is not null)
+                {
+                    blockValue = JintStatementList.HandleError(context.Engine, _singleStatement);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (ex is JintException)
+                {
+                    blockValue = JintStatementList.HandleException(context, ex, _singleStatement);
+                }
+                else
+                {
+                    throw;
+                }
+            }
+
+            return blockValue;
+        }
+
+        protected override Completion ExecuteInternal(EvaluationContext context)
+        {
+            return ExecuteBlock(context);
         }
     }
 }
